@@ -68,7 +68,6 @@
       <h3>📄 配套教学材料</h3>
       <ul>
         <li><code>操作.docx</code>：本地部署与课堂流程</li>
-        <li>教改论文：教学设计依据与评价框架</li>
         <li>全部素材随仓库开源，可直接用于授课</li>
       </ul>
     </td>
@@ -135,7 +134,6 @@ http://127.0.0.1:8000/index.html?showcase=1&v=4
 ├── 💾 hive-tower-data.js  # 蜂箱 GLB 原始字节内嵌数据
 ├── 🖼️ assets/             # 封面、热成像示意、贴图等配图资源
 ├── 📋 操作.docx           # 本地部署与课堂操作流程
-├── 📄 生成式AI技术……以养蜂学课程为例.docx  # 教改论文
 ├── 📖 README.md           # 本文件
 ├── ⚖️ LICENSE             # GNU AGPL-3.0 许可证
 ├── 📢 NOTICE.md           # 第三方资源声明
