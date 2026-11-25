@@ -1,0 +1,2293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>智能蜂箱 · 养蜂学数字化教学观测台</title>
+<link rel="icon" href="data:,">
+
+<!--
+  ============================================================================
+  蜂箱数据来源（本次重点修正）
+  ----------------------------------------------------------------------------
+  · hive-tower-data.js : 队长提供的
+      虚拟蜂场/virtual-beehive/model/hive-tower.glb
+      的【原始字节 base64 内嵌】，1,234,896 字节，未做任何几何 / 材质 /
+      层级 / 尺寸修改。之所以内嵌，是为了 file:// 双击打开时浏览器不会
+      拦截本地 GLB 的 XHR。GLB 自带队长烘焙的两段动画：
+        inspection（巡检：抬上层箱体 → 逐框拎脾 → 合箱）
+        service-door（检修门开合）
+  · hive-model.js      : 队长同一份可读源码（model/hive-model.js +
+      model/vendor/observer-model.js）的经典脚本封装，仅在 GLB 读取失败时
+      作为兜底重建，建模逻辑零改动。
+  · HIVE_GLB_URL       : 仍保留，填外部地址时可覆盖默认蜂箱。
+  · 蜜蜂 createAsset() : https://polyfork.dev/cdn/honeybee-2e4557.mjs
+  · three / OrbitControls / GLTFLoader / RoomEnvironment : importmap → unpkg
+  ============================================================================
+-->
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.180.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.180.0/examples/jsm/"
+  }
+}
+</script>
+<!-- 兜底源码封装 + 队长 GLB 原始数据，都是普通 script，file:// 可用 -->
+<script src="./hive-model.js"></script>
+<script src="./hive-tower-data.js"></script>
+
+<style>
+  :root {
+    color-scheme: light;
+    --ink: #192a25; --muted: #64736d; --line: rgba(25,42,37,.12);
+    --accent: #176b54; --accent-soft: #e7f2eb; --warn: #a32d2d;
+    --panel: rgba(250,252,249,.97); --panel-edge: rgba(255,255,255,.82);
+    --shadow: 0 18px 48px rgba(20,36,31,.18), 0 2px 8px rgba(20,36,31,.08);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: #dfe9f2; color: var(--ink); }
+  #scene { display: block; width: 100vw; height: 100vh; }
+
+  .hud {
+    position: absolute; top: 16px; left: 16px; width: 354px; max-width: min(354px, calc(100vw - 32px));
+    max-height: calc(100vh - 32px); overflow-y: auto; scrollbar-gutter: stable;
+    padding: 16px 17px 14px; border-radius: 10px;
+    background: var(--panel); border: 1px solid var(--panel-edge);
+    box-shadow: var(--shadow); backdrop-filter: blur(18px) saturate(1.18);
+  }
+  .hud::-webkit-scrollbar { width: 5px; }
+  .hud::-webkit-scrollbar-thumb { background: rgba(32,80,62,.24); border-radius: 4px; }
+  .hud h1 { margin: 0 0 5px; font-size: 18px; font-weight: 740; letter-spacing: 0; line-height: 1.25; color: #162a23; }
+  .hud .sub { margin: 0 0 5px; font-size: 11px; color: var(--muted); line-height: 1.55; }
+  .hud .sub + .sub { margin-bottom: 8px; color: #287052; font-weight: 650; }
+  .lesson-route { display: flex; align-items: center; gap: 7px; padding: 7px 9px; margin: 0 0 11px; border: 1px solid rgba(23,107,84,.14); border-radius: 6px; background: linear-gradient(90deg, rgba(231,242,235,.9), rgba(248,250,246,.9)); color: #28634d; font-size: 10px; font-weight: 700; }
+  .lesson-route .route-no { color: #7a8c82; font-size: 9px; font-weight: 600; margin-right: 2px; }
+  .lesson-route i { color: #9ab7a6; font-style: normal; font-weight: 500; }
+  .row { display: flex; align-items: center; gap: 8px; font-size: 12px; margin: 6px 0; flex-wrap: wrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #c9a227; flex: none; box-shadow: 0 0 0 3px rgba(201,162,39,.12); }
+  .dot.ok { background: #178f63; box-shadow: 0 0 0 3px rgba(23,143,99,.12); } .dot.err { background: var(--warn); box-shadow: 0 0 0 3px rgba(163,45,45,.12); }
+  .tag { display: inline-block; padding: 3px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .1px; }
+  .tag.warn { background: #fbeaea; color: var(--warn); }
+  .legend { margin: 10px 0 2px; display: grid; gap: 6px; }
+  .legend .item { display: flex; align-items: center; gap: 8px; font-size: 11px; min-height: 20px; }
+  .legend .sw { width: 12px; height: 12px; border-radius: 3px; flex: none; border: 1px solid rgba(0,0,0,.12); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+  .legend .sw.worker { background: #d8a33c; } .legend .sw.drone { background: #6f4a28; }
+  .legend .sw.queen { background: #ffc21f; box-shadow: inset -5px 0 0 #f7f7f2, 0 1px 2px rgba(0,0,0,.12); }
+  .legend .desc { color: var(--muted); font-size: 10px; margin-left: auto; text-align: right; }
+  .divider { height: 1px; background: linear-gradient(90deg, rgba(23,107,84,.22), rgba(25,42,37,.05)); margin: 12px 0 10px; }
+  .ctl { margin: 10px 0; }
+  .ctl label { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; color: var(--muted); margin-bottom: 5px; }
+  .ctl label b { color: var(--accent); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .ctl input[type=range] { width: 100%; accent-color: var(--accent); height: 16px; cursor: pointer; }
+  .hint { font-size: 11px; line-height: 1.65; color: var(--muted); margin: 0; }
+  .hint code { font-family: ui-monospace, Consolas, monospace; font-size: 10px; background: #f1f5f2; padding: 1px 4px; border-radius: 3px; color: #2b4a3c; }
+  .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  button, select {
+    font: inherit; font-size: 11px; cursor: pointer; padding: 7px 10px;
+    border: 1px solid rgba(25,42,37,.15); border-radius: 6px; background: #fff; color: var(--ink);
+    box-shadow: 0 1px 2px rgba(20,36,31,.04); transition: border-color .16s, background .16s, color .16s, box-shadow .16s, transform .16s;
+  }
+  select { padding: 6px 8px; max-width: 165px; }
+  button:hover, select:hover { border-color: var(--accent); color: var(--accent); box-shadow: 0 3px 10px rgba(23,107,84,.10); }
+  button:active { transform: translateY(1px); }
+  button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid #379c76; outline-offset: 2px; }
+  button.on { background: var(--accent-soft); border-color: rgba(23,107,84,.48); color: var(--accent); box-shadow: inset 0 0 0 1px rgba(23,107,84,.08); }
+  input[type=file] { display: none; }
+  #partInfo { margin-top: 7px; padding: 8px 10px; border-left: 2px solid #4a9a70; background: rgba(226,241,230,.72); min-height: 34px; color: #51655b; }
+  #boot { position: absolute; inset: 0; display: grid; place-items: center; background: #e7efe8; font-size: 13px; color: var(--muted); text-align: center; padding: 24px; line-height: 1.8; z-index: 5; }
+  #boot.hide { display: none; }
+  #drop { position: absolute; inset: 14px; border: 2px dashed var(--accent); border-radius: 16px; background: rgba(225,245,238,.82); display: none; place-items: center; font-size: 18px; color: var(--accent); pointer-events: none; z-index: 6; }
+  #drop.on { display: grid; }
+
+  /* ===================== 热成像识别模式 ===================== */
+  .hud { z-index: 8; }
+  #btnThermal {
+    position: absolute; top: 16px; right: 16px; z-index: 12;
+    display: inline-flex; align-items: center; gap: 9px;
+    padding: 10px 15px; border-radius: 8px;
+    background: rgba(20,32,29,.92); border: 1px solid rgba(210,232,221,.28);
+    color: #f1f8f3; font-size: 12px; font-weight: 700; letter-spacing: 0;
+    box-shadow: 0 10px 28px rgba(12,24,20,.28); backdrop-filter: blur(12px);
+    transition: background .2s, border-color .2s, transform .15s, box-shadow .2s;
+  }
+  #btnThermal:hover { border-color: #6fc3ff; transform: translateY(-1px); }
+  #btnThermal.on {
+    background: linear-gradient(135deg, #7d291c, #b84624);
+    border-color: #ffb078; color: #fff;
+    box-shadow: 0 10px 30px rgba(156,56,25,.34);
+  }
+  #btnThermal .chip {
+    width: 18px; height: 18px; border-radius: 4px; flex: none;
+    background: linear-gradient(135deg, #102a8a 0%, #7a1fa8 32%, #e2332a 62%, #ffcf3f 84%, #fff 100%);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.25);
+  }
+  #btnThermal .kbd { font: 10px ui-monospace, monospace; opacity: .62; border: 1px solid currentColor; border-radius: 3px; padding: 0 3px; }
+
+  #thermalOverlay { position: absolute; inset: 0; z-index: 7; pointer-events: none; display: none; }
+  #thermalOverlay.on { display: block; }
+  #thermalCanvas { display: block; width: 100%; height: 100%; }
+
+  #thermalPanel {
+    position: absolute; top: 68px; right: 16px; z-index: 11;
+    width: 318px; max-width: min(318px, calc(100vw - 32px)); max-height: calc(100vh - 84px); overflow-y: auto;
+    display: none; padding: 15px 16px 16px; border-radius: 9px;
+    background: rgba(15,21,28,.95); border: 1px solid rgba(183,213,195,.23);
+    box-shadow: 0 16px 42px rgba(6,12,10,.42); backdrop-filter: blur(16px) saturate(1.12);
+    color: #e3ece6; font-size: 11px; line-height: 1.6;
+  }
+  #thermalPanel.on { display: block; }
+  #thermalPanel::-webkit-scrollbar { width: 6px; }
+  #thermalPanel::-webkit-scrollbar-thumb { background: rgba(140,180,230,.3); border-radius: 3px; }
+  .tp-h { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; }
+  .tp-h b { font-size: 13px; letter-spacing: .1px; color: #fff; }
+  .tp-h span { font-size: 9px; color: #9bc0a9; letter-spacing: .5px; }
+  .tp-sub { color: #9db5a5; font-size: 10px; margin: 0 0 10px; }
+  .tp-sec { border-top: 1px solid rgba(183,213,195,.16); margin-top: 11px; padding-top: 10px; }
+  .tp-t { font-size: 10px; color: #a8c8b3; letter-spacing: .2px; margin-bottom: 7px; font-weight: 650; }
+  .tp-bar { height: 9px; border-radius: 5px; background: linear-gradient(90deg,#000028,#14006e,#5a0096,#c81e3c,#f56e14,#ffcd28,#ffffff); box-shadow: inset 0 0 0 1px rgba(255,255,255,.12); }
+  .tp-scale { display: flex; justify-content: space-between; font: 9px ui-monospace, monospace; color: #8fa6c4; margin-top: 3px; }
+  .tp-kv { display: flex; justify-content: space-between; align-items: baseline; padding: 3px 0; }
+  .tp-kv .k { color: #9fb2cc; }
+  .tp-kv .v { font: 600 12px ui-monospace, monospace; color: #fff; }
+  .tp-status { margin-top: 7px; padding: 7px 9px; border-radius: 5px; font-size: 10px; line-height: 1.55; background: rgba(40,180,120,.14); color: #8ce1ae; border: 1px solid rgba(40,180,120,.28); }
+  .tp-status.warn { background: rgba(255,140,40,.14); color: #ffd08c; border-color: rgba(255,140,40,.32); }
+  .tp-status.bad { background: rgba(255,70,70,.14); color: #ffb2b2; border-color: rgba(255,70,70,.32); }
+  .tp-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px dashed rgba(140,180,230,.10); }
+  .tp-row:last-child { border-bottom: 0; }
+  .tp-row .sw { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .tp-row .nm { flex: 1; color: #cbd8e8; }
+  .tp-row .ct { font: 10px ui-monospace, monospace; color: #fff; }
+  .tp-row .cf { font: 9px ui-monospace, monospace; color: #7ea8d8; width: 34px; text-align: right; }
+  .tp-code { font: 9px ui-monospace, Consolas, monospace; color: #86d6c0; background: rgba(0,0,0,.3); border: 1px solid rgba(120,200,180,.18); border-radius: 5px; padding: 6px 7px; word-break: break-all; line-height: 1.5; }
+  .tp-meter { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+  .tp-meter .lbl { width: 48px; color: #9fb2cc; font-size: 10px; }
+  .tp-meter .track { flex: 1; height: 5px; border-radius: 3px; background: rgba(255,255,255,.10); overflow: hidden; }
+  .tp-meter .fill { height: 100%; width: 0; border-radius: 3px; background: linear-gradient(90deg,#2b8fd6,#54d9a6); transition: width .4s; }
+  .tp-meter .num { width: 26px; text-align: right; font: 10px ui-monospace, monospace; color: #fff; }
+  .tp-acts { display: grid; grid-template-columns: repeat(3,1fr); gap: 5px; margin-top: 7px; }
+  .tp-acts button { font-size: 10px; padding: 6px 2px; background: rgba(255,255,255,.06); border: 1px solid rgba(140,180,230,.24); color: #cfe0f5; border-radius: 6px; }
+  .tp-acts button:hover { background: rgba(120,190,255,.16); border-color: #6fc3ff; color: #fff; }
+  .tp-cmd { display: flex; gap: 5px; margin-top: 6px; }
+  .tp-cmd input { flex: 1; min-width: 0; font-size: 10px; font-family: inherit; padding: 6px 7px; border-radius: 6px; background: rgba(0,0,0,.35); border: 1px solid rgba(140,180,230,.24); color: #e6f0ff; outline: none; }
+  .tp-cmd input:focus { border-color: #6fc3ff; }
+  .tp-cmd button { font-size: 10px; padding: 6px 9px; border-radius: 6px; background: rgba(80,170,255,.18); border: 1px solid rgba(120,190,255,.38); color: #d6eaff; }
+  .tp-log { margin-top: 6px; min-height: 15px; font-size: 10px; color: #8fd8ff; line-height: 1.5; }
+  /* 蜜蜂点击教学卡片：《养蜂学》专业知识点 */
+  #beeCard { position: fixed; z-index: 13; width: 326px; max-width: calc(100vw - 20px); max-height: min(54vh, 420px); overflow-y: auto; display: none;
+    background: rgba(18,29,25,.97);
+    border: 1px solid rgba(194,220,201,.24); border-radius: 8px; padding: 12px 14px 10px;
+    color: #edf4ee; font-size: 11px; line-height: 1.78; box-shadow: 0 16px 40px rgba(4,14,9,.42); backdrop-filter: blur(14px); }
+  #beeCard .bc-h { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; }
+  #beeCard .bc-badge { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 999px;
+    border: 1px solid #7fe0ff; color: #fff; white-space: nowrap; }
+  #beeCard .bc-state { flex: 1; font-size: 11px; color: #b0d5bc; }
+  #beeCard .bc-x { flex: none; width: 20px; height: 20px; border-radius: 6px; font-size: 10px;
+    background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.18); color: #cfe4ff; cursor: pointer; }
+  #beeCard .bc-body b { color: #a6e0b8; font-weight: 650; }
+  #beeCard .bc-foot { margin-top: 6px; padding-top: 5px; border-top: 1px solid rgba(120,190,255,.16);
+    font-size: 9.5px; color: #7fa8cc; }
+</style>
+</head>
+<body>
+
+<canvas id="scene"></canvas>
+
+<div class="hud">
+  <h1>养蜂学 · 蜂群数字化观测台</h1>
+  <p class="sub">生成式 AI 赋能新农科人才培养 · 专业课堂实训界面</p>
+  <p class="sub" style="margin-top:2px">设计制作：李震 · 李扬帆 · 张瑞馨</p>
+  <div class="lesson-route"><span class="route-no">课堂主线</span><span>观察</span><i>→</i><span>识别</span><i>→</i><span>解释</span><i>→</i><span>干预</span></div>
+
+  <div class="row"><span class="dot" id="dotHive"></span><span>蜂箱模型：<span id="hiveState">加载中…</span></span></div>
+  <div class="row"><span class="dot" id="dotBees"></span><span>蜂群状态：<span id="beeState">加载中…</span></span></div>
+  <div class="row"><span class="tag" id="scaleTag">真实比例 ×1</span><span class="tag warn" id="zoomWarn" style="display:none">示意放大 · 非真实比例</span></div>
+  <div class="row"><span class="tag" id="countTag">-- 只</span><span style="font-size:11px;color:var(--muted)" id="viewTag">剖视示意</span></div>
+  <p class="hint" style="margin:6px 0 0" id="scaleNote">工蜂体长 12.5 mm · 巢门高 15 mm · 蜂路 9–10 mm</p>
+
+  <div class="divider"></div>
+  <div class="legend">
+    <div class="item"><span class="sw worker"></span>工蜂 · 箱内 <span id="nWorker">28</span> + 飞行 2<span class="desc">侍从蜂 5 · 其余每框 0–2 只</span></div>
+    <div class="item"><span class="sw drone"></span>雄蜂 · 箱内 <span id="nDrone">3</span><span class="desc">蜂王脾外圈 · 宽胸钝腹 · 不采集</span></div>
+    <div class="item"><span class="sw queen"></span>蜂王 · 箱内 1<span class="desc">白色标记（2026 色标）· 育虫脾缓慢爬行</span></div>
+  </div>
+
+  <div class="divider"></div>
+  <div class="ctl">
+    <label>蜜蜂基准缩放（写实 0.00784）<b><span id="vBee">0.00784</span></b></label>
+    <input type="range" id="sBee" min="0.003" max="0.030" step="0.0001" value="0.00784">
+  </div>
+  <div style="font-size:11px;color:var(--muted);margin-bottom:5px">观察倍率（2× / 3× 为非真实比例的示意放大）</div>
+  <div class="btns" style="margin-top:0">
+    <button class="zoom on" data-zoom="1">1× 真实</button>
+    <button class="zoom" data-zoom="2">2× 示意</button>
+    <button class="zoom" data-zoom="3">3× 示意</button>
+  </div>
+
+  <div class="divider"></div>
+  <div class="ctl">
+    <label>飞行速度倍率 <b><span id="vSpeed">1.00</span> ×</b></label>
+    <input type="range" id="sSpeed" min="0.10" max="3.00" step="0.05" value="1.00">
+  </div>
+  <div class="btns" style="margin-top:0">
+    <button class="spd" data-spd="0.25">0.25× 慢放</button>
+    <button class="spd" data-spd="0.5">0.5×</button>
+    <button class="spd on" data-spd="1">1× 真实</button>
+    <button class="spd" data-spd="2">2× 快进</button>
+    <button id="btnPause">暂停</button>
+  </div>
+  <p class="hint" id="speedNote" style="margin:5px 0 0">1.00× = 实测真实速度</p>
+  <p class="hint" id="speedLive" style="margin:2px 0 0">实时：A -- m/s · B -- m/s</p>
+  <p class="hint" style="margin:2px 0 0">快捷键 <code>[</code> <code>]</code> 调速 · <code>空格</code> 暂停 · <code>R</code> 归位</p>
+
+  <div class="divider"></div>
+  <div style="font-size:11px;color:var(--muted);margin-bottom:5px">蜂箱结构交互（点击模型同样可操作）</div>
+  <div class="row">
+    <select id="selBox" aria-label="选择箱体层"></select>
+    <select id="selFrame" aria-label="选择巢框"></select>
+  </div>
+  <div class="btns" style="margin-top:2px">
+    <button id="btnLiftFrame">提起该框</button>
+    <button id="btnLiftBox">提起该层及以上</button>
+    <button id="btnResetLift">全部归位</button>
+    <button id="btnAuto" class="on">自动巡检：开</button>
+    <button id="btnFocusQueen">观察蜂王脾</button>
+  </div>
+  <p class="hint" id="partInfo">点击巢框 / 巢脾提起单片；按住 Alt 点击箱体提起整层；点击任意蜜蜂或幼虫可查看《养蜂学》专业知识点。蜜蜂挂在框上，会一起升起。</p>
+
+  <div class="btns">
+    <button id="btnCut" class="on">剖视：开</button>
+    <button id="btnPath">显示飞行路径</button>
+    <button id="btnInside">内部特写</button>
+    <button id="btnWide">全景</button>
+    <button id="btnFile">选择蜂箱 .glb</button>
+  </div>
+
+  <div class="divider"></div>
+  <details>
+    <summary style="font-size:11px;cursor:pointer;color:var(--accent)">科学基准与教学示意说明</summary>
+    <p class="hint" style="margin-top:7px">
+      · <b>蜂箱</b>：爱沙尼亚式 506×450×285 mm、10 框、框距 37.5 mm、巢门 300×15 mm，
+      上层箱体抬升 400 mm、单片巢框提起约 300 mm，均为养蜂巡检的真实作业参数。<br>
+      · <b>体长</b>：工蜂 12–13 mm、雄蜂 14–16 mm、蜂王 16–17 mm。<br>
+      · <b>蜂路</b>：9–10 mm，箱内蜂贴脾面六足抓附、腹部朝脾、身体长轴在脾面内爬行。<br>
+      · <b>飞行</b>：巢门附近进巢 0.32、出巢 0.54 m/s，直线 0.89 m/s，远段巡航 3.2–3.6 m/s；
+      速度按「离巢距离」分段插值并叠加真实抖动；进巢 88.5% 带 1–2 次转弯，出巢 63% 直线；
+      定向飞行面对巢门后退绕弧，之后在踏板降落爬入；踏板爬行 0.08 m/s。<br>
+      · <b>振翅</b>：真实约 230–250 Hz；画面以 9 Hz 慢放示意。<br>
+      · <b>分工</b>：蜂王只在婚飞 / 定向飞行时离巢；雄蜂不侍王、不采集；侍从圈由工蜂组成。<br>
+      · <b>标记</b>：国际五年色标（尾数 1/6 白、2/7 黄、3/8 红、4/9 绿、0/5 蓝），2026 年 = 白色。<br>
+      · <b>教学示意（非真实）</b>：箱内共 32 只（蜂王 1 + 雄蜂 3 + 工蜂 28），分布在三层的 30 张巢脾上；
+      蜂王脾集中 9 只——蜂王 1、侍从蜂 5（头朝蜂王成圈，半径 30 mm）、雄蜂 3（侍从圈外一圈）；
+      其余巢框保持<b>每框 0–2 只</b>——育虫箱中央脾蜂多、边脾少甚至空脾，上层继箱只留 2 只储蜜蜂；
+      箱内数量为便于辨认的示意数量，真实强群 2–6 万只工蜂；
+      半透明剖视不是真实外观（可切回原版不透明木箱）；2×/3× 放大会破坏真实比例，界面已标注。<br>
+      · <b>依据</b>：中国农业行业标准、爱沙尼亚 / Langstroth 蜂箱规格、
+      韩国农村振兴厅《蜂箱附近蜜蜂飞行速度与模式》、蜂王国际色标（UF/IFAS、UC ANR）。
+    </p>
+  </details>
+  <p class="hint" style="margin-top:8px">
+    控制台 <code>HIVE.CFG</code> 改参数；<code>HIVE.setFlightSpeed(v)</code> /
+    <code>HIVE.setTeachingZoom(2)</code> / <code>HIVE.setCutaway(false)</code> /
+    <code>HIVE.liftFrame(1,5)</code> / <code>HIVE.liftBox(0)</code> / <code>HIVE.resetLifts()</code> /
+    <code>HIVE.setAutoInspection(false)</code> 实时生效。
+  </p>
+  <input type="file" id="fileInput" accept=".glb,model/gltf-binary">
+</div>
+
+<button id="btnThermal" title="热成像识别：全箱热传感 + 幼虫/蜂群智能识别（快捷键 T）">
+  <span class="chip"></span><span class="txt">热成像识别</span><span class="kbd">T</span>
+</button>
+
+<div id="thermalOverlay"><canvas id="thermalCanvas"></canvas></div>
+
+<div id="beeCard">
+  <div class="bc-h">
+    <span class="bc-badge" id="bcBadge">工蜂</span>
+    <span class="bc-state" id="bcState">--</span>
+    <button class="bc-x" id="bcClose" title="关闭">✕</button>
+  </div>
+  <div class="bc-body" id="bcBody"></div>
+  <div class="bc-foot">《养蜂学》专业知识点 · 点击其他蜜蜂继续观察</div>
+</div>
+
+<div id="thermalPanel">
+  <div class="tp-h"><b>热成像识别 · 智能热传感</b><span>课堂观测台 / 01</span></div>
+  <p class="tp-sub">全箱热场 · 幼虫与三型蜂识别 · 蜂群福利评估</p>
+
+  <div class="tp-t">温度色标（℃）</div>
+  <div class="tp-bar"></div>
+  <div class="tp-scale"><span>24</span><span>28</span><span>32</span><span>35</span><span>38+</span></div>
+
+  <div class="tp-sec">
+    <div class="tp-t">实时温度 · 数字基因编码</div>
+    <div class="tp-kv"><span class="k">育虫区核心</span><span class="v" id="tpCore">-- ℃</span></div>
+    <div class="tp-kv"><span class="k">巢内环境</span><span class="v" id="tpNest">-- ℃</span></div>
+    <div class="tp-kv"><span class="k">巢温波动</span><span class="v" id="tpWave">-- ℃</span></div>
+    <div class="tp-kv"><span class="k">外界环境</span><span class="v" id="tpAmb">-- ℃</span></div>
+    <div class="tp-kv"><span class="k">上层继箱</span><span class="v" id="tpSuper">-- ℃</span></div>
+    <div class="tp-status" id="tpStatus">正在初始化热成像识别…</div>
+  </div>
+
+  <div class="tp-sec">
+    <div class="tp-t">识别结果 · 点击蜂体查看知识点 <span id="tpTotal">--</span></div>
+    <div id="tpTargets"></div>
+  </div>
+
+  <div class="tp-sec">
+    <div class="tp-t">数字基因编码向量 [温度·湿度·环境·波动·福利·密度]</div>
+    <div class="tp-code" id="tpCode">[ -- ]</div>
+  </div>
+
+  <div class="tp-sec">
+    <div class="tp-t">蜂群数字福利评估 <span id="tpWelfare">-- / 100</span></div>
+    <div class="tp-meter"><span class="lbl">空间舒适</span><span class="track"><span class="fill" id="mMeterComfort"></span></span><span class="num" id="mNumComfort">--</span></div>
+    <div class="tp-meter"><span class="lbl">行为自主</span><span class="track"><span class="fill" id="mMeterAutonomy"></span></span><span class="num" id="mNumAutonomy">--</span></div>
+    <div class="tp-meter"><span class="lbl">健康可持续</span><span class="track"><span class="fill" id="mMeterHealth"></span></span><span class="num" id="mNumHealth">--</span></div>
+    <div class="tp-kv"><span class="k">蜂群存活率</span><span class="v" id="tpSurv">--</span></div>
+    <div class="tp-kv"><span class="k">预计蜜产量</span><span class="v" id="tpHoney">--</span></div>
+    <div class="tp-kv"><span class="k">伦理决策积分</span><span class="v" id="tpEthic">--</span></div>
+  </div>
+
+  <div class="tp-sec">
+    <div class="tp-t">自然语言干预指令</div>
+    <div class="tp-acts">
+      <button data-cmd="vent">通风降温</button>
+      <button data-cmd="warm">应急保温</button>
+      <button data-cmd="reset">恢复自然</button>
+    </div>
+    <div class="tp-cmd">
+      <input id="tpInput" placeholder="例：巢温偏高，启动通风" aria-label="输入干预指令">
+      <button id="tpSend">发送</button>
+    </div>
+    <div class="tp-log" id="tpLog">提示：可输入「通风降温」「应急保温」「恢复自然」</div>
+  </div>
+</div>
+
+<div id="drop">松开以载入蜂箱 GLB</div>
+<div id="boot">正在载入蜂箱模型 / Three.js / 蜜蜂模型…<br><span style="font-size:11px">首次打开需要联网加载 three.js 与蜜蜂模型</span></div>
+
+<script>
+  window.__APP_READY = false;
+  setTimeout(function () {
+    if (!window.__APP_READY) {
+      var b = document.getElementById('boot');
+      if (b) b.innerHTML = '依赖加载失败或较慢。<br>请确认网络可访问 unpkg.com / polyfork.dev，<br>或在本目录运行 <code>python -m http.server 8000</code> 后通过 localhost 打开。';
+    }
+  }, 15000);
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { createAsset } from 'https://polyfork.dev/cdn/honeybee-2e4557.mjs';
+
+/* ==========================================================================
+   ① 【保留】外部蜂箱 GLB 路径；留空 = 用队长 GLB 原始数据
+   ========================================================================== */
+const HIVE_GLB_URL = '';   // 例：'./虚拟蜂场/virtual-beehive/model/hive-tower.glb'（需 http server）
+
+/* ==========================================================================
+   ② 【可调参数集中区】单位统一为「米」——与队长 GLB 一致，不再整体缩放
+   ========================================================================== */
+const CFG = {
+  /* 队长 GLB 内部 1 单位 = 1 米（源码 MM = 0.001，建模用 mm）。
+   * createAsset() 原始体长 1.5937 模型单位；真实工蜂 0.0125 m
+   * → beeScale = 0.0125 / 1.5937 ≈ 0.00784。 */
+  beeScale: 0.00784,
+  teachingZoom: 1,
+  zoomSteps: [1, 2, 3],
+
+  wings: 'folded',
+  colorway: 'italian',
+  roleScale: { worker: 1, drone: 1.18, queen: 1.20 },
+  roleShape: { worker: [1, 1, 1], drone: [1.12, 1.03, 1], queen: [1, 1, 1.10] },
+  dronePalette: {
+    fur: '#8a5b26', crown: '#3a2412', amber: '#7a4a16', black: '#241509',
+    eyes: '#2b1408', glint: '#d8b47a', membrane: '#c9b08a', veins: '#4a2c10', pellet: '#9a6b2c',
+  },
+  queenPalette: {
+    fur: '#ffd24a', crown: '#c8891a', amber: '#ffb300', black: '#8a4a08',
+    eyes: '#7a2b12', glint: '#fff4c0', membrane: '#ffe9a0', veins: '#b9700a', pellet: '#ffd76a',
+  },
+  queenDotColor: 0xf7f7f2,
+  queenDotRadius: 0.20,
+
+  interior: {
+    queenCount: 1, droneCount: 3, workerCount: 28,   // 箱内合计 32 只（蜂王 1 + 雄蜂 3 + 工蜂 28）
+    queenFrame: 5,
+    combFaceOffset: 0.005,
+    scatter: 0.068,
+    retinueCount: 5,        // 蜂王身边侍从蜂 5 只（真实侍从圈 6–10 只，演示取 5 只）
+    retinueRadius: 0.030,
+    crawlAmp: 0.006,
+    crawlHz: 0.22,
+    positions: null,
+    /* —— 分布表 ——
+     * 蜂王脾（box1 frame5）= 蜂王 1 + 侍从蜂 5 + 雄蜂 3，共 9 只，围绕蜂王成圈；
+     * 其余巢框保持每框 0–2 只：育虫箱中央多、边脾少，继箱仅少量储蜜蜂。
+     * 数组下标 = 巢框序号。 */
+    framePlan: [
+      { box: 0, frames: [[], [], ['worker'], ['worker', 'worker'], ['worker'],
+                         ['worker', 'worker'], ['worker'], ['worker'], [], []] },   // 8 只
+      { box: 1, frames: [['worker'], ['worker'], ['worker', 'worker'], ['worker', 'worker'],
+                         ['worker'], ['queen', 'worker', 'worker', 'worker', 'worker', 'worker',
+                                      'drone', 'drone', 'drone'],
+                         ['worker', 'worker'], ['worker', 'worker'], ['worker', 'worker'], []] }, // 22 只
+      { box: 2, frames: [[], [], [], [], ['worker'], ['worker'], [], [], [], []] }, // 2 只
+    ],
+  },
+
+  /* —— 飞行：全部按真实米制、真实实测速度 —— */
+  flight: {
+    speed: 1.0,              // 【可调】1.00 = 实测真实速度
+    baseMps: 0.32,           // 巢门附近进巢实测 m/s
+    outMps: 0.54,            // 巢门附近出巢实测 m/s
+    straightMps: 0.89,       // 直线飞行实测 m/s
+    cruiseMps: 3.40,         // 远段巡航实测 3.2–3.6 m/s
+    accelNear: 1.00,         // 0.15–1.0 m：由巢门速度升到直线速度
+    accelFar: 3.00,          // 1.0–3.0 m：由直线速度升到巡航速度
+    crawlMps: 0.08,          // 踏板 / 巢门爬行 m/s
+    jitterHz1: 1.7, jitterAmp1: 0.12,   // 真实飞行速度的慢抖动
+    jitterHz2: 4.3, jitterAmp2: 0.08,   // 振翅 / 机动带来的快抖动
+    gustAmp: 0.10,           // 阵风式随机扰动上限
+    dwellMin: 0.8, dwellMax: 1.8,       // 定向飞行（面对巢门后退绕弧）时长 s
+    hoverRadius: 0.45,       // 触发定向飞行的离巢距离 m
+    hoverWobble: 0.006,      // 悬停微调 6 mm（旧版 53 mm 过大）
+    hoverArc: 0.06,          // 面对巢门后退绕弧半径 m
+    hoverBack: 0.16,         // 定向飞行后退距离 m
+    undulation: 0.011,       // 飞行起伏 11 mm
+    pathRandomness: 0.11,    // 每圈重新生成的控制点扰动（m）
+    aPhase: 0.42, bPhase: 0.06,
+    wingBeatsRealHz: 240,
+    wingBeatsVisualHz: 9,
+    showPaths: false,
+    // 相对巢门的世界坐标偏移，单位「米」。A 进巢：远 → 2 次转弯 → 定向悬停 → 踏板 → 巢门内
+    shapeA: [
+      [ 3.875, 1.531, 3.500], [ 2.375, 0.969, 2.125], [ 1.188, 0.500, 1.094],
+      [ 0.219, 0.188, 0.656], [ 0.594, 0.300, 0.388], [ 0.175, 0.100, 0.213],
+      [ 0.100, 0.020, 0.160], [ 0.000,-0.050, 0.030], [ 0.000,-0.055,-0.120],
+    ],
+    // B 出巢：巢门内 → 踏板起飞 → 近似直线快速离场
+    shapeB: [
+      [ 0.000,-0.055,-0.120], [ 0.000,-0.050, 0.030], [ 0.062, 0.013, 0.113],
+      [ 0.344, 0.263, 0.594], [ 1.375, 0.781, 1.813],
+      [ 2.625, 1.281, 3.063], [ 3.938, 1.781, 4.375],
+    ],
+    fallbackEntry: new THREE.Vector3(0, 0.40, 0.62),
+  },
+
+  /* —— 剖视：完全采用队长 viewer.js / teaching.js 的同款参数 ——
+   * cladding ghost 0.13、箱体木壁 xray 0.22。
+   * 旧版把巢脾 0.06 / 巢框 0.30 / 底板箱盖 0.14 也做成半透明，
+   * 结果整个蜂箱变成黄色薄雾，看起来像被化简了——本次全部取消。 */
+  cutaway: {
+    enabled: true,
+    cladding: 'ghost',       // 'ghost' | 'off' | 'solid'
+    claddingOpacity: 0.13,   // 队长 viewer.js setClad('ghost') 原值
+    boxOpacity: 0.22,        // 队长 teaching.js setXray(true) 原值
+  },
+
+  labHive: {
+    scale: 1.0,             // ★ 不再整体缩放：完全保留队长模型的真实尺寸
+    inspectBox: 1,          // 队长 GLB 的被检查箱序号（0 起）
+    stack: ['deep', 'deep', 'super'],
+    hideModelBees: false,   // ★ 不再隐藏队长模型自带的装饰小蜂
+  },
+
+  inspection: {
+    auto: true,             // 默认播放队长 GLB 烘焙的 inspection 巡检动画
+    speed: 1.0,
+  },
+
+  lift: {
+    frameHeight: 0.300,     // 单片巢框提起 ≈300 mm（队长 derived.frameLift）
+    boxGap: 0.400,          // 上层箱体抬升 400 mm（队长 DEFAULTS.gap）
+    ease: 3.5,
+  },
+
+  cameras: {
+    wide:   { pos: [2.6, 1.9, 3.2], target: [0, 1.00, 0] },
+    inside: { offset: [0.30, 0.12, 0.48] },   // 站在机柜外看被提起的巢脾
+  },
+
+  hiveTargetSize: 3.2,
+};
+
+/* ==========================================================================
+   ③ 场景 / 相机 / 灯光：与队长 viewer.js / teaching.js 一致
+   ========================================================================== */
+const canvas = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.autoUpdate = true;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+
+const scene = new THREE.Scene();
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.55;
+const SKY = 0xd9e7e9;
+scene.background = new THREE.Color(SKY);
+scene.fog = new THREE.Fog(SKY, 9, 34);
+
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.05, 50);
+camera.position.fromArray(CFG.cameras.wide.pos);
+const controls = new OrbitControls(camera, canvas);
+controls.target.fromArray(CFG.cameras.wide.target);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.minDistance = 0.30;
+controls.maxDistance = 9;
+controls.maxPolarAngle = Math.PI * 0.495;
+controls.update();
+
+const sun = new THREE.DirectionalLight(0xfff4df, 3.15);
+sun.position.set(2.5, 4.5, 3);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -1.6, right: 1.6, top: 2.4, bottom: -0.4, near: 0.5, far: 12 });
+sun.shadow.bias = -0.00025;
+sun.shadow.normalBias = 0.018;
+const fill = new THREE.HemisphereLight(0xcfe6ff, 0x66834a, 0.72);
+const rim = new THREE.DirectionalLight(0xd8efff, 0.42);
+rim.position.set(-3.5, 2.8, -2.2);
+scene.add(sun, fill, rim);
+
+const groundTexture = new THREE.TextureLoader().load('./assets/apiary-ground-texture.jpg');
+groundTexture.colorSpace = THREE.SRGBColorSpace;
+groundTexture.wrapS = THREE.RepeatWrapping;
+groundTexture.wrapT = THREE.RepeatWrapping;
+groundTexture.repeat.set(14, 14);
+groundTexture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 8);
+const ground = new THREE.Mesh(
+  new THREE.CircleGeometry(30, 96),
+  new THREE.MeshStandardMaterial({ map: groundTexture, color: 0xb1bf91, roughness: 0.98, metalness: 0 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+const pad = new THREE.Mesh(
+  new THREE.BoxGeometry(1.3, 0.02, 1.2),
+  new THREE.MeshStandardMaterial({ color: 0xaaa79a, roughness: 0.86, metalness: 0.02 })
+);
+pad.receiveShadow = true;
+scene.add(ground, pad);
+
+// 队长 viewer.js 的天空穹顶（渐变蓝天 → 地平线薄雾）
+const skyMat = new THREE.ShaderMaterial({
+  uniforms: { top: { value: new THREE.Color(0x2c86c4) }, horizon: { value: new THREE.Color(0xd7e9ed) } },
+  vertexShader: 'varying vec3 vDir; void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+  fragmentShader: 'uniform vec3 top; uniform vec3 horizon; varying vec3 vDir; void main(){ float h=clamp(vDir.y,0.0,1.0); gl_FragColor=vec4(mix(horizon,top,smoothstep(0.0,0.22,h)),1.0);\n#include <colorspace_fragment>\n}',
+  side: THREE.BackSide, depthWrite: false, fog: false,
+});
+const sky = new THREE.Mesh(new THREE.SphereGeometry(45, 32, 16), skyMat);
+sky.renderOrder = -1;
+scene.add(sky);
+
+/* ==========================================================================
+   ④ 蜂箱：直接载入队长 GLB 原始字节，或队长源码兜底
+   ========================================================================== */
+const hiveHolder = new THREE.Group();
+scene.add(hiveHolder);
+let booted = false;         // 顶层 await 阶段只装蜂箱，蜜蜂 / 飞行在模块末尾统一初始化
+let activeHive = null;
+let labModel = null;            // 源码兜底时的 Qu() 返回值
+let mixer = null, inspectionAction = null, inspectionClip = null;
+let animatedObjects = [];       // 巡检动画会改写的对象（手动提起前需复位）
+const baseXform = new Map();    // Object3D → { p, q, s }（t=0 的原始变换）
+
+const H = {                     // 队长模型的节点索引，全部按名字查，不改层级
+  root: null, clad: null, boxMaterials: [], boxes: [], frames: [], framesByBox: [],
+  lid: null, liftedStack: null, landingBoard: null, bees: null, inspectBox: CFG.labHive.inspectBox,
+};
+let boardInfo = null;
+let entryPoint = CFG.flight.fallbackEntry.clone();
+let combInfo = { width: 0.390, height: 0.239, centerX: 0, centerY: -0.1395, faceZ: 0.012 };
+const combCache = new Map();   // 各巢框巢脾实测尺寸缓存（每框深/浅不同）
+
+const meshViewCache = new WeakMap();
+const matViewCache = new WeakMap();
+function ghostMaterial(mat, on, opacity) {
+  let orig = matViewCache.get(mat);
+  if (!orig) { orig = { transparent: mat.transparent, opacity: mat.opacity, depthWrite: mat.depthWrite }; matViewCache.set(mat, orig); }
+  if (on) { mat.transparent = true; mat.opacity = Math.min(orig.opacity, opacity); mat.depthWrite = false; }
+  else { mat.transparent = orig.transparent; mat.opacity = orig.opacity; mat.depthWrite = orig.depthWrite; }
+  mat.needsUpdate = true;
+}
+function ghostMesh(mesh, on, opacity) {
+  let e = meshViewCache.get(mesh);
+  if (!e) {
+    const src = mesh.material;
+    const clone = Array.isArray(src) ? src.map(m => m.clone()) : src.clone();
+    mesh.material = clone;
+    const mats = Array.isArray(clone) ? clone : [clone];
+    e = { mats, orig: mats.map(m => ({ transparent: m.transparent, opacity: m.opacity, depthWrite: m.depthWrite })) };
+    meshViewCache.set(mesh, e);
+  }
+  e.mats.forEach((m, i) => {
+    if (on) { m.transparent = true; m.opacity = Math.min(e.orig[i].opacity, opacity); m.depthWrite = false; }
+    else { m.transparent = e.orig[i].transparent; m.opacity = e.orig[i].opacity; m.depthWrite = e.orig[i].depthWrite; }
+    m.needsUpdate = true;
+  });
+}
+
+/* 剖视只改「外柜挂板」和「箱体木壁」的透明度——与队长 setClad / setXray 完全一致。
+   巢脾、巢框、底板、箱盖、摄像头、传感器、屋顶全部保持队长原版不透明材质。 */
+function applyCutaway(on) {
+  if (!H.root) return;
+  const c = CFG.cutaway;
+  if (H.clad) {
+    H.clad.visible = !(on && c.cladding === 'off');
+    H.clad.traverse(o => { if (o.isMesh) ghostMesh(o, on && c.cladding === 'ghost', c.claddingOpacity); });
+  }
+  for (const m of H.boxMaterials) ghostMaterial(m, on, c.boxOpacity);
+  const mode = on ? c.cladding : 'solid';
+  document.getElementById('viewTag').textContent = !on
+    ? '原版外观 · 木柜不透明'
+    : mode === 'off' ? '剖视 · 外柜已移开'
+    : 'Ghost 半透明剖视视图';
+  const btn = document.getElementById('btnCut');
+  btn.textContent = on ? (mode === 'off' ? '剖视：外柜移开' : '剖视：开') : '原版外观';
+  btn.classList.toggle('on', on);
+}
+/* 队长 setClad() 的三档视图选项，只是显示状态，不改模型 */
+function setCladdingMode(mode) {
+  CFG.cutaway.cladding = mode;
+  CFG.cutaway.enabled = mode !== 'solid';
+  applyCutaway(CFG.cutaway.enabled);
+}
+
+function indexHive(root) {
+  H.root = root;
+  H.clad = root.getObjectByName('cladding');
+  H.lid = root.getObjectByName('lid');
+  H.liftedStack = root.getObjectByName('liftedStack');
+  H.landingBoard = root.getObjectByName('landingBoard');
+  H.bees = root.getObjectByName('bees');
+  H.boxMaterials = [];
+  H.boxes = []; H.framesByBox = []; H.frames = [];
+
+  const seenMat = new Set();
+  root.traverse(o => {
+    if (o.isMesh) {
+      o.castShadow = true; o.receiveShadow = true;
+      if (o.userData.part === 'box' && o.material && !seenMat.has(o.material.uuid)) {
+        seenMat.add(o.material.uuid);
+        (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => H.boxMaterials.push(m));
+      }
+    }
+    const bm = /^box(\d+)$/.exec(o.name || '');
+    if (bm) { H.boxes[+bm[1]] = o; return; }
+    const fm = /^box(\d+)_frame(\d+)$/.exec(o.name || '');
+    if (fm) {
+      const b = +fm[1], f = +fm[2];
+      if (!H.framesByBox[b]) H.framesByBox[b] = [];
+      H.framesByBox[b][f] = o;
+      H.frames.push(o);
+    }
+  });
+  H.inspectBox = Math.min(CFG.labHive.inspectBox, Math.max(0, H.boxes.length - 1));
+  if (!H.framesByBox[H.inspectBox] && labModel && labModel.nodes) {
+    H.framesByBox[H.inspectBox] = labModel.nodes.frames || [];
+  }
+
+  root.updateMatrixWorld(true);
+  if (H.landingBoard) {
+    const bb = new THREE.Box3().setFromObject(H.landingBoard);
+    const ctr = new THREE.Vector3(); bb.getCenter(ctr);
+    const sz = new THREE.Vector3(); bb.getSize(sz);
+    boardInfo = { center: ctr.clone(), top: bb.max.y, halfWidth: sz.x / 2, frontZ: bb.max.z };
+    entryPoint.set(ctr.x, bb.max.y + 0.045, bb.max.z + 0.030);
+  } else {
+    boardInfo = null;
+    entryPoint.copy(CFG.flight.fallbackEntry);
+  }
+
+  // 巢脾尺寸直接用队长模型的 comb 网格实测（frame 局部坐标，单位 m）
+  combCache.clear();          // 换模型后旧巢脾的实测数据作废
+  const f0 = (H.framesByBox[H.inspectBox] || [])[0];
+  if (f0) {
+    const box = new THREE.Box3();
+    f0.traverse(o => { if (o.isMesh && o.userData.part === 'comb') box.expandByObject(o); });
+    if (!box.isEmpty()) {
+      const mn = f0.worldToLocal(box.min.clone());
+      const mx = f0.worldToLocal(box.max.clone());
+      combInfo = {
+        width: mx.x - mn.x, height: mx.y - mn.y,
+        centerX: (mn.x + mx.x) / 2, centerY: (mn.y + mx.y) / 2, faceZ: mx.z,
+      };
+    }
+  }
+}
+
+/* 手动提起的基础：记录所有会被巡检动画改写对象的 t=0 变换 + 各可提起件的基准 Y */
+const liftMap = new Map();      // Object3D → { baseY, cur, target }
+let boxLiftActive = false;
+function captureBase(root, clip) {
+  baseXform.clear(); animatedObjects = [];
+  const names = new Set();
+  if (clip) for (const t of clip.tracks) names.add(t.name.split('.')[0]);
+  root.traverse(o => {
+    baseXform.set(o, { p: o.position.clone(), q: o.quaternion.clone(), s: o.scale.clone() });
+    if (names.has(o.name)) animatedObjects.push(o);
+  });
+  liftMap.clear();
+  const add = o => { if (o && !liftMap.has(o)) liftMap.set(o, { baseY: o.position.y, cur: 0, target: 0 }); };
+  H.frames.forEach(add);
+  H.boxes.forEach(add);
+  add(H.lid); add(H.liftedStack);
+}
+function restoreAnimated() {
+  for (const o of animatedObjects) {
+    const b = baseXform.get(o);
+    if (b) { o.position.copy(b.p); o.quaternion.copy(b.q); o.scale.copy(b.s); }
+  }
+}
+function updateLifts(dt) {
+  // 指数缓动：与帧率无关（无头 / 低配浏览器也能在同样的时间内到位）
+  const k = 1 - Math.exp(-CFG.lift.ease * dt);
+  for (const [o, r] of liftMap) {
+    if (Math.abs(r.target - r.cur) > 1e-6) {
+      r.cur += (r.target - r.cur) * k;
+      o.position.y = r.baseY + r.cur;
+    }
+  }
+}
+function setLiftTarget(o, v) { const r = liftMap.get(o); if (r) r.target = v; }
+function resetLifts() {
+  stopAutoInspection();
+  boxLiftActive = false;
+  for (const [o, r] of liftMap) { r.target = 0; o.position.y = r.baseY; r.cur = 0; }
+  setPartInfo('全部箱体与巢框已归位。');
+}
+
+const isInsideLifted = o => {
+  if (!H.liftedStack) return false;
+  for (let p = o.parent; p; p = p.parent) if (p === H.liftedStack) return true;
+  return false;
+};
+function stopAutoInspection() {
+  if (!CFG.inspection.auto) return;
+  CFG.inspection.auto = false;
+  if (inspectionAction) inspectionAction.stop();
+  restoreAnimated();
+  for (const [o, r] of liftMap) { o.position.y = r.baseY; r.cur = 0; }
+  const b = document.getElementById('btnAuto');
+  b.textContent = '自动巡检：关'; b.classList.remove('on');
+}
+function setAutoInspection(on) {
+  CFG.inspection.auto = !!on;
+  const b = document.getElementById('btnAuto');
+  b.textContent = '自动巡检：' + (on ? '开' : '关');
+  b.classList.toggle('on', on);
+  if (on) {
+    boxLiftActive = false;
+    for (const [o, r] of liftMap) { r.target = 0; r.cur = 0; }
+    if (mixer && inspectionClip) {
+      inspectionAction = mixer.clipAction(inspectionClip);
+      inspectionAction.reset();
+      inspectionAction.setLoop(THREE.LoopRepeat, Infinity);
+      inspectionAction.play();
+    }
+  } else {
+    if (inspectionAction) inspectionAction.stop();
+    restoreAnimated();
+    for (const [o, r] of liftMap) { o.position.y = r.baseY; r.cur = 0; }
+  }
+}
+
+/* 单片巢框提起（蜜蜂是该 frame 的子对象，自动跟随） */
+function liftFrame(boxIdx, frameIdx) {
+  stopAutoInspection();
+  const f = (H.framesByBox[boxIdx] || [])[frameIdx];
+  if (!f) return false;
+  const r = liftMap.get(f);
+  const up = r && r.target > 0.001;
+  setLiftTarget(f, up ? 0 : CFG.lift.frameHeight);
+  // 队长的巡检顺序：先抬上层箱体 400 mm 腾出空间，再把巢框竖直拎出，
+  // 否则巢框会穿进上面的箱体。与 hive-model.js 的 timeline 完全一致。
+  const anyFrameUp = H.frames.some(o => (liftMap.get(o)?.target || 0) > 0.001);
+  if (H.liftedStack) setLiftTarget(H.liftedStack, (anyFrameUp || boxLiftActive) ? CFG.lift.boxGap : 0);
+  setPartInfo(`${up ? '落回' : '提起'}第 ${boxIdx + 1} 层 · 第 ${frameIdx + 1} 框，`
+    + `上层箱体同时抬升 ${Math.round(CFG.lift.boxGap * 1000)} mm；框上蜜蜂一同升起。`);
+  return true;
+}
+/* 提起某一层及其以上所有箱体（队长模型把上层装在 liftedStack 里） */
+function liftBox(boxIdx) {
+  stopAutoInspection();
+  const L = CFG.lift.boxGap, k = H.inspectBox;
+  const anyUp = H.boxes.some((o, i) => i >= boxIdx && (liftMap.get(o)?.target || 0) > 0.001);
+  const v = anyUp ? 0 : L;
+  boxLiftActive = !anyUp;
+  H.boxes.forEach((o, i) => {
+    if (!o) return;
+    let t = 0;
+    if (i >= boxIdx) {
+      if (isInsideLifted(o)) t = (boxIdx > k) ? v : 0;   // 由 liftedStack 统一抬升
+      else t = v;
+    }
+    setLiftTarget(o, t);
+  });
+  if (H.liftedStack) setLiftTarget(H.liftedStack, boxIdx <= k ? v : 0);
+  if (H.lid) setLiftTarget(H.lid, boxIdx > k ? v : 0);
+  setPartInfo(`${anyUp ? '落回' : '提起'}第 ${boxIdx + 1} 层及其以上箱体 ${Math.round(L * 1000)} mm。`);
+  return true;
+}
+function setPartInfo(text) { const el = document.getElementById('partInfo'); if (el) el.textContent = text; }
+
+function disposeObject(root) {
+  root.traverse(o => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => m.dispose());
+  });
+}
+
+function installHive(root, label, clips) {
+  if (activeHive) { hiveHolder.remove(activeHive); disposeObject(activeHive); }
+  activeHive = root;
+  hiveHolder.add(root);
+  // ★ 不缩放、不居中、不旋转、不删件：完全保持队长 GLB 原始坐标
+  root.scale.setScalar(CFG.labHive.scale);
+
+  if (mixer) { mixer.stopAllAction(); mixer.uncacheRoot(mixer.getRoot()); mixer = null; }
+  indexHive(root);
+  if (CFG.labHive.hideModelBees && H.bees) H.bees.visible = false;
+  inspectionClip = (clips || []).find(c => /inspection/i.test(c.name)) || null;
+  captureBase(root, inspectionClip);
+  if (inspectionClip) {
+    mixer = new THREE.AnimationMixer(root);
+    inspectionAction = mixer.clipAction(inspectionClip);
+    inspectionAction.setLoop(THREE.LoopRepeat, Infinity);
+    if (CFG.inspection.auto) inspectionAction.play();
+  }
+  applyCutaway(CFG.cutaway.enabled);
+  setStatus('dotHive', 'hiveState', label, 'ok');
+  syncStructureUI();
+  if (booted) { rebuildInterior(); rebuildFlightPaths(); }
+}
+
+function decodeEmbeddedGLB() {
+  if (!window.HIVE_TOWER_GLB_BASE64) return null;
+  const bin = atob(window.HIVE_TOWER_GLB_BASE64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+function parseGLB(buffer) {
+  return new Promise((resolve, reject) => {
+    new GLTFLoader().parse(buffer, '', g => resolve(g), e => reject(e));
+  });
+}
+function buildFromSource() {
+  if (!window.LabHive || !window.LabHive.createFactory) throw new Error('hive-model.js 与 GLB 数据均不可用');
+  const factory = window.LabHive.createFactory(THREE);
+  labModel = factory.Qu({ stack: CFG.labHive.stack, inspectBox: CFG.labHive.inspectBox });
+  return labModel.root;
+}
+
+async function initHive() {
+  if (HIVE_GLB_URL) {
+    try {
+      const g = await new GLTFLoader().loadAsync(HIVE_GLB_URL);
+      installHive(g.scene, '外部 GLB · ' + HIVE_GLB_URL.split('/').pop(), g.animations);
+      return;
+    } catch (e) { console.warn('[Hive] 外部 GLB 失败，回退队长内嵌 GLB：', e); }
+  }
+  const buf = decodeEmbeddedGLB();
+  if (buf) {
+    try {
+      const g = await parseGLB(buf);
+      installHive(g.scene, '科学写实三维蜂箱（hive-tower.glb）', g.animations);
+      return;
+    } catch (e) { console.warn('[Hive] 内嵌 GLB 解析失败，回退源码重建：', e); }
+  }
+  installHive(buildFromSource(), '源码重建（GLB 不可用）', []);
+}
+try {
+  await initHive();   // 顶层 await：后续蜜蜂 / 飞行都基于已就绪的蜂箱节点
+} catch (err) {
+  console.error('[Hive] 蜂箱载入失败：', err);
+  setStatus('dotHive', 'hiveState', '蜂箱载入失败：' + err.message, 'err');
+}
+
+/* ==========================================================================
+   ⑤ 蜜蜂工厂（用户负责的部分）：createAsset() 独立个体
+   ========================================================================== */
+const BEE_LOCAL_LENGTH = 1.5937;
+const BEE_LOCAL_CENTER_Y = 0.468;
+const allBees = [];
+const beeScaleNow = () => CFG.beeScale * CFG.teachingZoom;
+const roleScale = k => (CFG.roleScale && CFG.roleScale[k]) || 1;
+const roleShape = k => (CFG.roleShape && CFG.roleShape[k]) || [1, 1, 1];
+
+function collectWingBones(asset) {
+  const out = [];
+  asset.traverse(o => {
+    if (o.isBone === true && /Wing/i.test(o.name || '')) { o.userData.restZ = o.rotation.z; out.push(o); }
+  });
+  return out;
+}
+function createBee(kind, opts = {}) {
+  const flying = !!opts.flying;
+  const o = {
+    wings: opts.wings || (flying ? 'spread' : 'folded'),
+    pollen: opts.pollen || (kind === 'worker' && flying && opts.carrying ? 'loaded' : 'empty'),
+    fluff: kind === 'queen' ? 0.5 : kind === 'drone' ? 0.45 : 0.35,
+    colorway: CFG.colorway,
+    abdomen: opts.abdomen || (kind === 'queen' ? 1.10 : 1.0),
+  };
+  if (kind === 'queen') o.palette = CFG.queenPalette;
+  if (kind === 'drone') o.palette = CFG.dronePalette;
+  const asset = createAsset(o);
+  const g = new THREE.Group();
+  g.name = 'Bee_' + kind;
+  g.userData.kind = kind; g.userData.flying = flying;
+  asset.position.y = -BEE_LOCAL_CENTER_Y;
+  g.add(asset);
+  g.userData.wingBones = collectWingBones(asset);
+  applyBeeScale(g);
+  asset.traverse(m => { if (m.isMesh) m.castShadow = false; });
+  (opts.parent || scene).add(g);
+  allBees.push(g);
+  return g;
+}
+function applyBeeScale(g) {
+  const base = beeScaleNow() * roleScale(g.userData.kind);
+  const s = roleShape(g.userData.kind);
+  g.scale.set(base * s[0], base * s[1], base * s[2]);
+}
+function dotScaleNow() { return (CFG.beeScale / 0.00784) * CFG.teachingZoom; }
+function refreshScaleUI() {
+  const z = CFG.teachingZoom;
+  const real = Math.abs(CFG.beeScale - 0.00784) < 1e-5;
+  const tag = document.getElementById('scaleTag');
+  tag.textContent = z === 1 ? (real ? '真实比例 ×1' : '自定义基准 ×1') : '示意放大 ×' + z;
+  tag.className = 'tag' + (z === 1 ? '' : ' warn');
+  document.getElementById('zoomWarn').style.display = z === 1 ? 'none' : 'inline-block';
+  document.getElementById('scaleNote').textContent = z === 1
+    ? '工蜂体长 12.5 mm · 巢门高 15 mm · 蜂路 9–10 mm'
+    : '当前工蜂体长约 ' + (12.5 * z).toFixed(1) + ' mm（示意放大，比例已失真）';
+  document.querySelectorAll('button.zoom').forEach(b => b.classList.toggle('on', Number(b.dataset.zoom) === z));
+  document.getElementById('vBee').textContent = CFG.beeScale.toFixed(5);
+  document.getElementById('sBee').value = CFG.beeScale;
+}
+function setBeeScale(v) {
+  CFG.beeScale = Math.max(0.001, Number(v) || 0.00784);
+  for (const g of allBees) applyBeeScale(g);
+  if (queenParts) queenParts.dot.scale.setScalar(dotScaleNow());
+  refreshScaleUI();
+}
+function setTeachingZoom(v) {
+  const z = Number(v);
+  CFG.teachingZoom = CFG.zoomSteps.includes(z) ? z : 1;
+  for (const g of allBees) applyBeeScale(g);
+  if (queenParts) queenParts.dot.scale.setScalar(dotScaleNow());
+  refreshScaleUI();
+}
+
+/* ==========================================================================
+   ⑥ 箱内蜂群：★ 每只蜂都挂到它所在的 frame 组上，框被提起时自动跟随
+   ========================================================================== */
+const interiorBees = [];   // { kind, index, frame, local, base, world, group }
+let queenParts = null;
+function clearInterior() {
+  for (const b of interiorBees) {
+    if (b.group.parent) b.group.parent.remove(b.group);
+    const i = allBees.indexOf(b.group); if (i >= 0) allBees.splice(i, 1);
+    b.group.traverse(o => {
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => m.dispose());
+    });
+  }
+  interiorBees.length = 0;
+  if (queenParts) {
+    if (queenParts.dot.parent) queenParts.dot.parent.remove(queenParts.dot);
+    queenParts.dot.geometry.dispose(); queenParts.dot.material.dispose();
+    queenParts = null;
+  }
+}
+function seeded(n) { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); }
+const COMB_Q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 1).normalize(), Math.PI);
+const AXIS_Z = new THREE.Vector3(0, 0, 1);
+const combHeading = gamma => new THREE.Quaternion().setFromAxisAngle(AXIS_Z, gamma).multiply(COMB_Q);
+
+/* 每张巢脾单独实测：深箱脾 279 mm、继箱脾 164 mm，尺寸不同，不能共用同一份数据 */
+function combInfoOf(frame) {
+  if (!frame) return combInfo;
+  const hit = combCache.get(frame.uuid);
+  if (hit) return hit;
+  frame.updateWorldMatrix(true, false);
+  const box = new THREE.Box3();
+  frame.traverse(o => { if (o.isMesh && o.userData.part === 'comb') box.expandByObject(o); });
+  let info = combInfo;
+  if (!box.isEmpty()) {
+    const mn = frame.worldToLocal(box.min.clone());
+    const mx = frame.worldToLocal(box.max.clone());
+    info = {
+      width: Math.abs(mx.x - mn.x), height: Math.abs(mx.y - mn.y),
+      centerX: (mn.x + mx.x) / 2, centerY: (mn.y + mx.y) / 2,
+      faceZ: Math.max(mn.z, mx.z),
+    };
+  }
+  combCache.set(frame.uuid, info);
+  return info;
+}
+/* 同一张脾上最多 2 只蜂：成对的两点分别落在脾面两侧，避免重叠（真实蜂也彼此留出体长间距） */
+const SPOT_PAIRS = [
+  [[-0.46,  0.30], [ 0.42, -0.26]],
+  [[-0.14, -0.50], [ 0.22,  0.52]],
+  [[-0.55, -0.06], [ 0.54,  0.14]],
+];
+function combLocalAt(geo, kind, index, slot, role, ordinal) {
+  const I = CFG.interior;
+  const halfW = geo.width * 0.5 * 0.66;
+  const halfH = geo.height * 0.5 * 0.62;
+  const z = geo.faceZ + I.combFaceOffset;
+  if (kind === 'queen') return [geo.centerX, geo.centerY, z];
+  // 侍从圈：5 只头朝蜂王，围在半径 30 mm 的圈上（真实 6–10 只，体长 12.5 mm）
+  if (role === 'attendant') {
+    const a = (ordinal / Math.max(1, I.retinueCount)) * Math.PI * 2 + 0.62;
+    return [geo.centerX + Math.cos(a) * I.retinueRadius,
+            geo.centerY + Math.sin(a) * I.retinueRadius, z, a + Math.PI];
+  }
+  // 雄蜂在侍从圈外一圈（约 58 mm），不与侍从蜂挤在一起
+  if (role === 'drone') {
+    const a = (ordinal / Math.max(1, I.droneCount)) * Math.PI * 2 + 1.28;
+    const rd = I.retinueRadius * 1.95;
+    return [geo.centerX + Math.cos(a) * rd, geo.centerY + Math.sin(a) * rd, z, a];
+  }
+  const pair = SPOT_PAIRS[Math.abs(index + (slot === 1 ? 1 : 0)) % SPOT_PAIRS.length];
+  const s = pair[slot === 1 ? 1 : 0];
+  const shrink = kind === 'drone' ? 0.92 : 1;
+  return [geo.centerX + s[0] * halfW * shrink,
+          geo.centerY + s[1] * halfH * shrink, z];
+}
+function frameAt(boxIdx, frameIdx) {
+  const list = H.framesByBox[boxIdx] || H.framesByBox[H.inspectBox] || [];
+  return list[Math.max(0, Math.min(list.length - 1, frameIdx))] || null;
+}
+function frameWorld(boxIdx, frameIdx, local) {
+  const f = frameAt(boxIdx, frameIdx);
+  if (!f) return new THREE.Vector3(...local);
+  f.updateWorldMatrix(true, false);
+  return f.localToWorld(new THREE.Vector3(...local));
+}
+/* 把 framePlan 展开成逐只记录；蜂王脾上的侍从蜂排到工蜂 0..N 号，点击即弹出「侍从蜂」卡片 */
+function buildInteriorPlan() {
+  const I = CFG.interior, out = [];
+  (I.framePlan || []).forEach(spec => {
+    const list = H.framesByBox[spec.box] || [];
+    (spec.frames || []).forEach((kinds, frame) => {
+      if (!list[frame] || !kinds || !kinds.length) return;
+      kinds.forEach((kind, slot) => out.push({ kind, box: spec.box, frame, slot }));
+    });
+  });
+  const onQueenFrame = e => e.box === H.inspectBox && e.frame === I.queenFrame;
+  const attendants = out.filter(e => e.kind === 'worker' && onQueenFrame(e));
+  if (attendants.length) {
+    const rest = out.filter(e => !attendants.includes(e));
+    out.length = 0;
+    out.push(...attendants, ...rest);   // 侍从蜂优先编号（工蜂 0 起）
+  }
+  return out;
+}
+function rebuildInterior() {
+  clearInterior();
+  const frames = H.framesByBox[H.inspectBox] || [];
+  if (!frames.length) return;
+  const I = CFG.interior, manual = I.positions;
+  const spawn = (kind, index, boxIdx, frameIdx, slot, role, ordinal, worldOverride, heading) => {
+    const fg = frameAt(boxIdx, frameIdx);
+    if (!fg) return null;
+    const local = combLocalAt(combInfoOf(fg), kind, index, slot, role, ordinal);
+    const g = createBee(kind, { parent: fg });       // ★ 父级 = 巢框
+    if (worldOverride) fg.worldToLocal(g.position.set(...worldOverride));
+    else g.position.set(local[0], local[1], local[2]);
+    const autoHeading = local[3] !== undefined ? local[3]
+      : (seeded(boxIdx * 37 + frameIdx * 9 + index * 3) - 0.5) * 1.6;
+    g.quaternion.copy(combHeading(heading !== undefined ? heading : autoHeading));
+    const base = g.position.clone();
+    const rec = { kind, index, box: boxIdx, frame: frameIdx, local, role: role || '', base, world: new THREE.Vector3(), group: g };
+    interiorBees.push(rec);
+    if (kind === 'queen' && !queenParts) {
+      const dot = new THREE.Mesh(
+        new THREE.SphereGeometry(0.00784 * CFG.queenDotRadius, 14, 10),
+        new THREE.MeshStandardMaterial({ color: CFG.queenDotColor, emissive: 0x555555, emissiveIntensity: 0.25, roughness: 0.55 })
+      );
+      dot.name = 'QueenMarker';
+      dot.scale.setScalar(dotScaleNow());
+      fg.add(dot);                                    // ★ 标记也挂在框上
+      queenParts = { bee: g, dot, frame: fg };
+    }
+    return rec;
+  };
+
+  // 按 CFG.interior.framePlan 逐框生成：蜂王脾 = 蜂王 1 + 侍从蜂 5 + 雄蜂 3；
+  // 其余巢框保持每框 0–2 只（育虫箱中央多、边脾少，继箱仅 2 只储蜜蜂）。
+  const counters = { queen: 0, worker: 0, drone: 0, retinue: 0, droneRing: 0 };
+  for (const e of buildInteriorPlan()) {
+    const onQueenFrame = e.box === H.inspectBox && e.frame === I.queenFrame;
+    let role = '';
+    if (onQueenFrame && e.kind === 'worker' && counters.retinue < I.retinueCount) role = 'attendant';
+    else if (onQueenFrame && e.kind === 'drone' && counters.droneRing < I.droneCount) role = 'drone';
+    const ordinal = role === 'attendant' ? counters.retinue++
+      : role === 'drone' ? counters.droneRing++ : 0;
+    const idx = counters[e.kind]++;
+    const pool = e.kind === 'queen' ? manual && manual.queen
+      : manual && manual[e.kind + 's'] && manual[e.kind + 's'][idx];
+    spawn(e.kind, idx, e.box, e.frame, e.slot, role, ordinal, pool,
+      e.kind === 'queen' ? 0 : undefined);
+  }
+
+  const inside = counters.queen + counters.drone + counters.worker;
+  const queenFrameCount = counters.retinue + counters.droneRing + counters.queen;
+  document.getElementById('nWorker').textContent = counters.worker;
+  document.getElementById('nDrone').textContent = counters.drone;
+  document.getElementById('countTag').textContent =
+    '箱内 ' + inside + ' 只 · 箱外 2 只（示意数量）';
+  setStatus('dotBees', 'beeState',
+    '示意数量 · 蜂王脾 ' + queenFrameCount + ' 只 · 其余每框 0–2 只', 'ok');
+}
+function moveInteriorBee(kind, index, x, y, z) {
+  const rec = interiorBees.find(b => b.kind === kind && b.index === index);
+  if (!rec) return false;
+  const v = Array.isArray(x) ? new THREE.Vector3(x[0], x[1], x[2]) : new THREE.Vector3(x, y, z);
+  const fg = rec.group.parent;
+  if (fg) { fg.updateWorldMatrix(true, false); fg.worldToLocal(v); }
+  rec.base.copy(v); rec.group.position.copy(v); rec.world.copy(v);
+  return true;
+}
+
+/* ==========================================================================
+   ⑦ 箱外飞行：按「真实米制 + 实测速度剖面 + 抖动」沿曲线弧长推进
+   ========================================================================== */
+const flightRoot = new THREE.Group();
+flightRoot.name = 'FlightPaths';
+scene.add(flightRoot);
+
+function makeCurve(shape, seed) {
+  const R = CFG.flight.pathRandomness;
+  const pts = shape.map((p, i) => {
+    const jitter = (i === 0 || i === shape.length - 1) ? 0 : R;
+    return new THREE.Vector3(
+      entryPoint.x + p[0] + (seeded(seed + i * 3.1) - .5) * jitter,
+      entryPoint.y + p[1] + (seeded(seed + i * 5.7) - .5) * jitter * .4,
+      entryPoint.z + p[2] + (seeded(seed + i * 7.3) - .5) * jitter
+    );
+  });
+  const curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal', 0.5);
+  // 找出「已落到踏板高度」的弧长区间：只有这一段按真实爬行速度推进，
+  // 巢门前 0.2–0.4 m 的悬停与绕弧仍然是飞行，不能算作爬行。
+  const N = 240;
+  let first = 1, last = 0;
+  for (let i = 0; i <= N; i++) {
+    const u = i / N, p = curve.getPointAt(u);
+    if (p.y < entryPoint.y - 0.025) { first = Math.min(first, u); last = Math.max(last, u); }
+  }
+  curve.userGroundA = Math.min(0.99, Math.max(0.80, first));
+  curve.userGroundB = Math.max(0.01, Math.min(0.20, last));
+  return curve;
+}
+let curves = { A: makeCurve(CFG.flight.shapeA, 11), B: makeCurve(CFG.flight.shapeB, 29) };
+let pathLines = [];
+function makePathLine(curve, color) {
+  const line = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(curve.getPoints(200)),
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.55, depthWrite: false })
+  );
+  line.visible = CFG.flight.showPaths;
+  flightRoot.add(line);
+  return line;
+}
+function rebuildFlightPaths() {
+  for (const l of pathLines) { flightRoot.remove(l); l.geometry.dispose(); l.material.dispose(); }
+  curves = { A: makeCurve(CFG.flight.shapeA, 11), B: makeCurve(CFG.flight.shapeB, 29) };
+  pathLines = [makePathLine(curves.A, 0x1d7fa8), makePathLine(curves.B, 0xc2601d)];
+  for (const f of flyers) {
+    f.curve = curves[f.key];
+    f.u = f.key === 'A' ? CFG.flight.aPhase : CFG.flight.bPhase;
+    f.dwell = 0; f.dwellDone = false; f.gust = 0;
+  }
+}
+function setShowPaths(on) {
+  CFG.flight.showPaths = on;
+  for (const l of pathLines) l.visible = on;
+  const b = document.getElementById('btnPath');
+  b.textContent = on ? '隐藏飞行路径' : '显示飞行路径';
+  b.classList.toggle('on', on);
+}
+
+const flyers = [
+  { key: 'A', label: '进巢携粉', bee: createBee('worker', { flying: true, carrying: true, abdomen: 1.10 }),
+    fadeIn: 0.00, fadeOut: 0.995, seed: 1.3, seedCurve: 11 },
+  { key: 'B', label: '出巢采集', bee: createBee('worker', { flying: true }),
+    fadeIn: 0.005, fadeOut: 0.999, seed: 4.7, seedCurve: 29 },
+];
+for (const f of flyers) {
+  f.bee.name = 'FlyingWorker_' + f.key;
+  f.curve = curves[f.key];
+  f.u = f.key === 'A' ? CFG.flight.aPhase : CFG.flight.bPhase;
+  f.pos = new THREE.Vector3();
+  f.dwell = 0; f.dwellDone = false; f.dwellTotal = 1;
+  f.gust = 0; f.gustTimer = 0; f.speedNow = 0; f.hover = 0; f.ground = 0;
+}
+
+const ZERO = new THREE.Vector3(0, 0, 0);
+const UP = new THREE.Vector3(0, 1, 0);
+const _tan = new THREE.Vector3(), _look = new THREE.Matrix4(), _negTan = new THREE.Vector3();
+const _q = new THREE.Quaternion(), _e = new THREE.Euler(), _tmp = new THREE.Vector3(), _toDoor = new THREE.Vector3();
+const clamp01 = x => Math.max(0, Math.min(1, x));
+const smoothstep = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+let paused = false;
+let liveTick = 0;
+
+function reseedFlyer(f) {
+  f.seedCurve += 7;
+  const c = makeCurve(f.key === 'A' ? CFG.flight.shapeA : CFG.flight.shapeB, f.seedCurve);
+  f.curve = c; curves[f.key] = c;
+  const line = pathLines[f.key === 'A' ? 0 : 1];
+  if (line) { line.geometry.dispose(); line.geometry = new THREE.BufferGeometry().setFromPoints(c.getPoints(200)); }
+  f.dwellDone = false; f.dwell = 0;
+}
+
+/* 真实速度剖面：0.32/0.54 → 0.89 → 3.4 m/s，按离巢距离分段插值，
+   叠加 1.7 Hz / 4.3 Hz 抖动与慢变阵风；不再用旧版叠乘式刹车把蜂拖慢。 */
+function realSpeed(dist, key) {
+  const F = CFG.flight;
+  const v0 = key === 'B' ? F.outMps : F.baseMps;
+  return v0
+    + (F.straightMps - v0) * smoothstep(0.15, F.accelNear, dist)
+    + (F.cruiseMps - F.straightMps) * smoothstep(F.accelNear, F.accelFar, dist);
+}
+
+function updateFlyers(dt, t) {
+  const F = CFG.flight;
+  for (const f of flyers) {
+    const len = Math.max(0.01, f.curve.getLength());
+    const uPrev = clamp01(f.u);
+    const pPrev = f.curve.getPointAt(uPrev, _tmp).clone();
+    const dist = pPrev.distanceTo(entryPoint);
+
+    // 定向飞行：进巢蜂第一次靠近巢门时，面对巢门后退绕弧停留 0.8–1.8 s
+    if (f.key === 'A' && !f.dwellDone && dist < F.hoverRadius && uPrev > 0.55) {
+      f.dwellDone = true;
+      f.dwellTotal = F.dwellMin + seeded(f.seedCurve * 2.3) * (F.dwellMax - F.dwellMin);
+      f.dwell = f.dwellTotal;
+      f.dwellPos = pPrev.clone();
+    }
+
+    let v = 0, vReal = 0;
+    if (f.dwell > 0) {
+      f.dwell = Math.max(0, f.dwell - dt * F.speed);
+      const s = 1 - clamp01(f.dwell / f.dwellTotal);       // 0 → 1
+      const back = Math.sin(s * Math.PI) * F.hoverBack;     // 后退再回到巢门前
+      const ang = s * Math.PI * 2.4 + f.seed;
+      const p = f.dwellPos.clone();
+      p.x += Math.cos(ang) * F.hoverArc + Math.sin(t * 8.2 + f.seed) * F.hoverWobble;
+      p.y += Math.sin(t * 11.4 + f.seed * 1.3) * F.hoverWobble * 0.5;
+      p.z += back + Math.sin(ang) * F.hoverArc + Math.cos(t * 6.6 + f.seed) * F.hoverWobble * 0.4;
+      f.pos.copy(p);
+      f.bee.position.copy(p);
+      _toDoor.copy(entryPoint).sub(p).normalize();
+      _negTan.copy(_toDoor).negate();
+      v = F.baseMps * 0.35;
+      vReal = v;
+      f.hover = 1; f.ground = 0;
+    } else {
+      // 慢变阵风（每 ~0.45 s 重取一次），叠加快慢抖动
+      f.gustTimer -= dt;
+      if (f.gustTimer <= 0) { f.gustTimer = 0.45; f.gust = (seeded(t * 7.3 + f.seed) - 0.5) * 2 * F.gustAmp; }
+      const jitter = 1
+        + F.jitterAmp1 * Math.sin(t * Math.PI * 2 * F.jitterHz1 + f.seed)
+        + F.jitterAmp2 * Math.sin(t * Math.PI * 2 * F.jitterHz2 + f.seed * 2.1)
+        + f.gust;
+      const groundSeg = f.key === 'A' ? (uPrev >= f.curve.userGroundA) : (uPrev <= f.curve.userGroundB);
+      if (groundSeg) {
+        v = F.crawlMps * (0.85 + 0.3 * seeded(f.seedCurve + Math.floor(t * 3)));
+        f.ground = 1;
+      } else {
+        const j = Math.max(0.4, Math.min(1.7, jitter));
+        v = realSpeed(dist, f.key) * j;
+        f.ground = 0;
+      }
+      vReal = v;
+      v *= F.speed;
+      f.u += (v * dt) / len;                                // ★ 弧长推进 = 真正的 m/s
+      if (f.u >= 1) { f.u -= 1; reseedFlyer(f); }
+      const u = clamp01(f.u);
+      const p = f.curve.getPointAt(u, _tmp).clone();
+      f.curve.getTangentAt(u, _tan).normalize();
+      const air = 1 - f.ground;
+      const w = F.undulation * air;
+      p.x += Math.sin(t * 2.1 + f.seed) * w;
+      p.y += Math.sin(t * 3.3 + f.seed * 1.7) * w * 0.75;
+      p.z += Math.cos(t * 2.7 + f.seed * 0.8) * w * 0.6;
+      f.pos.copy(p);
+      f.bee.position.copy(p);
+      _negTan.copy(_tan).negate();
+      const hover = 1 - smoothstep(0.15, F.hoverRadius, dist);
+      f.hover = hover;
+      if (hover > 0.001 && f.ground < 0.5) {
+        _toDoor.copy(entryPoint).sub(p).normalize();
+        _negTan.lerp(_toDoor.negate(), hover * 0.85).normalize();
+      }
+      f.bee.visible = u >= f.fadeIn && u <= f.fadeOut;
+    }
+    f.speedNow = vReal;                                   // 真实物理速度（不受倍率影响）
+
+    // 朝向：+Z 对齐切线；定向飞行时头朝巢门
+    _look.lookAt(ZERO, _negTan, UP);
+    _q.setFromRotationMatrix(_look);
+    const air = 1 - f.ground;
+    _e.set(
+      Math.sin(t * 4.3 + f.seed) * 0.05 * air,
+      Math.sin(t * 9.0 + f.seed) * 0.04 * air + (f.dwell > 0 ? Math.sin(t * 5.4 + f.seed) * 0.10 : 0),
+      Math.sin(t * 6.2 + f.seed) * 0.06 * air
+    );
+    f.bee.quaternion.copy(_q).multiply(new THREE.Quaternion().setFromEuler(_e));
+
+    // 翅膀：飞行展翅慢放振翅；踏板爬行收翅停摆
+    const amp = 1 - f.ground;
+    for (const b of (f.bee.userData.wingBones || [])) {
+      const sg = /^Left/i.test(b.name) ? 1 : -1;
+      b.rotation.z = b.userData.restZ
+        + sg * (0.12 + Math.sin(t * Math.PI * 2 * F.wingBeatsVisualHz + f.seed) * 0.22) * amp;
+    }
+  }
+}
+
+function setFlightSpeed(v) {
+  CFG.flight.speed = Math.max(0.05, Number(v) || 1);
+  document.getElementById('sSpeed').value = CFG.flight.speed;
+  document.getElementById('vSpeed').textContent = CFG.flight.speed.toFixed(2);
+  document.getElementById('speedNote').textContent = CFG.flight.speed === 1
+    ? '1.00× = 实测真实速度（0.32 / 0.54 / 0.89 / 3.40 m/s）'
+    : (CFG.flight.speed < 1 ? '慢放示意（非真实速度）' : '加速示意（非真实速度）');
+  document.querySelectorAll('button.spd').forEach(b =>
+    b.classList.toggle('on', Math.abs(Number(b.dataset.spd) - CFG.flight.speed) < 1e-6));
+}
+
+/* ==========================================================================
+   ⑧.5 热成像识别（Thermal AI）
+   ——依据论文 3.1「数字基因编码」、3.2「巢脾温度分布的热成像观察」、
+     3.3「蜂群数字福利评估：巢温波动」与「自然语言指令调整通风 / 应急保温、
+     实时反馈蜂群存活率与蜜产量」。本模块不改动队长 GLB 与蜜蜂模型，
+     仅用 2D 叠加层 + 世界坐标投影实现伪彩热图与随动识别框。
+   ========================================================================== */
+const THERMAL = {
+  on: false,
+  core: 35.2,          // 育虫区核心温度 ℃（蜂王产卵区正常 34.5~35.5）
+  coreTarget: 35.2,    // 自然语言干预后的目标温度
+  ambient: 26.0,       // 外界环境温度 ℃
+  wave: 0.3,           // 巢温波动 ±℃
+  scan: 0,
+  ethic: 120,          // 伦理决策积分
+  lastUi: 0,
+  counts: { queen: 0, worker: 0, drone: 0, brood: 0 },
+  targets: [],
+  broodAnchors: [],
+  savedExposure: 1.05,
+  savedCam: null,
+  savedTarget: null,
+  fieldCache: null,
+  fieldDirty: true,
+  fieldTime: 0,
+};
+
+// 黑体辐射伪彩色标：24℃ 深蓝 → 38℃ 白热
+const HEAT_STOPS = [
+  [0.00, [  0,  0, 40]],
+  [0.20, [ 20,  0,110]],
+  [0.40, [ 90,  0,150]],
+  [0.58, [200, 30, 60]],
+  [0.74, [245,110, 20]],
+  [0.88, [255,205, 40]],
+  [1.00, [255,255,235]],
+];
+const tempNorm = t => clamp01((t - 24) / 14);
+function heatColor(t, alpha) {
+  const v = tempNorm(t);
+  let a = HEAT_STOPS[0], b = HEAT_STOPS[HEAT_STOPS.length - 1];
+  for (let i = 1; i < HEAT_STOPS.length; i++) {
+    if (v <= HEAT_STOPS[i][0]) { a = HEAT_STOPS[i - 1]; b = HEAT_STOPS[i]; break; }
+  }
+  const k = (v - a[0]) / Math.max(1e-6, b[0] - a[0]);
+  const c = a[1].map((x, i) => Math.round(x + (b[1][i] - x) * k));
+  return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + (alpha === undefined ? 1 : alpha) + ')';
+}
+
+const KIND_STYLE = {
+  queen:  { name: '蜂王', en: 'QUEEN',  color: '#ff6a3d', temp: 35.5 },
+  worker: { name: '工蜂', en: 'WORKER', color: '#7fe0ff', temp: 34.8 },
+  drone:  { name: '雄蜂', en: 'DRONE',  color: '#ffc247', temp: 34.2 },
+  brood:  { name: '幼虫', en: 'BROOD',  color: '#ff4d9d', temp: 35.2 },
+};
+const targetTemp = t => (t.kind === 'brood' ? THERMAL.core + t.tempOff : t.temp);
+
+/* 幼虫锚点挂在蜂王所在巢框上：提起巢脾 / 巡检动画时热点自动跟随 */
+function buildBroodAnchors() {
+  for (const a of THERMAL.broodAnchors) if (a.parent) a.parent.remove(a);
+  THERMAL.broodAnchors.length = 0;
+  const frames = H.framesByBox[H.inspectBox] || [];
+  const fi = CFG.interior.queenFrame;
+  const picks = [fi - 2, fi, fi + 2].filter(i => frames[i]);
+  const stages = [0, 0.22, 0.42, 0.60];
+  picks.forEach((idx, gi) => {
+    const f = frames[idx];
+    const per = gi === 1 ? 8 : 5;
+    for (let i = 0; i < per; i++) {
+      const ring = stages[i % stages.length];
+      const ang = (Math.floor(i / stages.length) + 0.35) / 2 * Math.PI * 2 + ring * 2;
+      const a = new THREE.Object3D();
+      a.name = 'BroodAnchor_' + gi + '_' + i;
+      a.position.set(
+        combInfo.centerX + Math.cos(ang) * ring * combInfo.width * 0.42,
+        combInfo.centerY + Math.sin(ang) * ring * combInfo.height * 0.38,
+        combInfo.faceZ + 0.0035
+      );
+      f.add(a);
+      THERMAL.broodAnchors.push(a);
+    }
+  });
+}
+
+/* 识别目标：三种蜜蜂复用真实蜂体对象（每帧随动），幼虫为巢脾上的发育热点 */
+function buildThermalTargets() {
+  buildBroodAnchors();
+  const list = [];
+  for (const rec of interiorBees) {
+    const s = KIND_STYLE[rec.kind];
+    list.push({
+      id: rec.kind + '_' + rec.index, kind: rec.kind, obj: rec.group,
+      temp: s.temp + (seeded(rec.index * 3.7 + 2) - 0.5) * 0.5,
+      conf: 0.93 + seeded(rec.index * 8.1) * 0.06,
+      annotate: rec.kind === 'queen'
+        || (rec.kind === 'drone' && rec.index === 0)
+        || (rec.kind === 'worker' && rec.index === 1),
+    });
+  }
+  for (const f of flyers) {
+    list.push({ id: 'fly_' + f.key, kind: 'worker', obj: f.bee, temp: 34.6, conf: 0.91, annotate: false });
+  }
+  const stages = ['卵', '幼虫', '蛹'];
+  THERMAL.broodAnchors.forEach((a, i) => {
+    list.push({
+      id: 'brood_' + i, kind: 'brood', obj: a,
+      tempOff: (seeded(i * 5.3) - 0.5) * 0.7,
+      conf: 0.90 + seeded(i * 2.9) * 0.08,
+      annotate: i === 0 || i === 5 || i === 9,
+      stage: stages[i % 3],
+    });
+  });
+  THERMAL.targets = list;
+}
+
+function projectToScreen(obj) {
+  const p = obj.getWorldPosition(new THREE.Vector3()).project(camera);
+  return {
+    x: (p.x * 0.5 + 0.5) * innerWidth,
+    y: (-p.y * 0.5 + 0.5) * innerHeight,
+    z: p.z,
+  };
+}
+
+/* 全箱温度模型：育虫层为核心温度，上下继箱逐层向环境温度衰减 */
+function boxTemp(b) {
+  if (!H.boxes.length) return THERMAL.core;
+  if (b === H.inspectBox) return THERMAL.core;
+  return THERMAL.core - Math.min(6.0, Math.abs(b - H.inspectBox) * 2.6);
+}
+function frameTemp(b, f) {
+  const frames = H.framesByBox[b] || [];
+  const mid = Math.max(1, (frames.length - 1) / 2);
+  const dist = Math.abs(f - CFG.interior.queenFrame) / mid;
+  return boxTemp(b) - Math.min(1.8, dist * 1.4);
+}
+
+/* 每层箱体的整体热晕：让整只蜂箱都处在热传感覆盖下 */
+function drawBoxHalos(ctx) {
+  const W = innerWidth, Hh = innerHeight;
+  for (let b = 0; b < H.boxes.length; b++) {
+    const box = H.boxes[b];
+    if (!box) continue;
+    const bb = new THREE.Box3().setFromObject(box);
+    if (bb.isEmpty()) continue;
+    const c = new THREE.Vector3(); bb.getCenter(c);
+    const proj = c.clone().project(camera);
+    if (proj.z > 1) continue;
+    const x = (proj.x * 0.5 + 0.5) * W, y = (-proj.y * 0.5 + 0.5) * Hh;
+    const p1 = bb.min.clone().project(camera), p2 = bb.max.clone().project(camera);
+    const r = Math.max(48, Math.hypot((p2.x - p1.x) * W / 2, (p2.y - p1.y) * Hh / 2));
+    const t = boxTemp(b);
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, heatColor(t, 0.20));
+    g.addColorStop(1, heatColor(t, 0));
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+/* 单个巢框：圆角脾形 + 径向温度场 + 密集六边形巢房（育虫/封盖/蜜粉/空房分区） */
+function drawFrameComb(ctx, frame, b, fi) {
+  frame.updateWorldMatrix(true, false);
+  const hw = combInfo.width * 0.5, hh = combInfo.height * 0.5;
+  const cs = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([x, y]) => {
+    const p = frame.localToWorld(new THREE.Vector3(
+      combInfo.centerX + x, combInfo.centerY + y, combInfo.faceZ + 0.002
+    )).project(camera);
+    return { x: (p.x * 0.5 + 0.5) * innerWidth, y: (-p.y * 0.5 + 0.5) * innerHeight, z: p.z };
+  });
+  if (cs.some(p => p.z < -1 || p.z > 1)) return;
+  const wpx = Math.hypot(cs[1].x - cs[0].x, cs[1].y - cs[0].y);
+  const hpx = Math.hypot(cs[3].x - cs[0].x, cs[3].y - cs[0].y);
+  if (wpx < 12 || hpx < 9) return;
+  const minX = Math.min(cs[0].x, cs[1].x, cs[2].x, cs[3].x);
+  const minY = Math.min(cs[0].y, cs[1].y, cs[2].y, cs[3].y);
+  const maxX = Math.max(cs[0].x, cs[1].x, cs[2].x, cs[3].x);
+  const maxY = Math.max(cs[0].y, cs[1].y, cs[2].y, cs[3].y);
+  if (maxX < -20 || minX > innerWidth + 20 || maxY < -20 || minY > innerHeight + 20) return;
+
+  const lerp = (a, q, t) => ({ x: a.x + (q.x - a.x) * t, y: a.y + (q.y - a.y) * t });
+  const k = 0.20;
+  const path = () => {
+    ctx.beginPath();
+    const a = lerp(cs[0], cs[1], k), b2 = lerp(cs[0], cs[3], k);
+    ctx.moveTo(a.x, a.y); ctx.quadraticCurveTo(cs[0].x, cs[0].y, b2.x, b2.y);
+    const c = lerp(cs[3], cs[0], k), d = lerp(cs[3], cs[2], k);
+    ctx.lineTo(c.x, c.y); ctx.quadraticCurveTo(cs[3].x, cs[3].y, d.x, d.y);
+    const e = lerp(cs[2], cs[3], k), f = lerp(cs[2], cs[1], k);
+    ctx.lineTo(e.x, e.y); ctx.quadraticCurveTo(cs[2].x, cs[2].y, f.x, f.y);
+    const g = lerp(cs[1], cs[2], k), h = lerp(cs[1], cs[0], k);
+    ctx.lineTo(g.x, g.y); ctx.quadraticCurveTo(cs[1].x, cs[1].y, h.x, h.y);
+    ctx.closePath();
+  };
+
+  const temp = frameTemp(b, fi);
+  ctx.save(); path(); ctx.clip();
+  const cx = (cs[0].x + cs[2].x) / 2, cy = (cs[0].y + cs[2].y) / 2;
+  const rad = Math.max(16, Math.hypot(cs[2].x - cs[0].x, cs[2].y - cs[0].y) / 2);
+  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
+  g.addColorStop(0,    heatColor(temp + 0.6, 0.95));
+  g.addColorStop(0.42, heatColor(temp - 0.5, 0.85));
+  g.addColorStop(1,    heatColor(temp - 3.0, 0.60));
+  ctx.fillStyle = g; ctx.fillRect(minX - 2, minY - 2, maxX - minX + 4, maxY - minY + 4);
+
+  // 六边形巢房：中心育虫区（卵/幼虫/封盖）→ 外围蜜粉区 → 边缘空房
+  const detail = wpx * hpx > 900;
+  const cols = Math.max(5, Math.min(detail ? 14 : 8, Math.round(wpx / 15)));
+  const rows = Math.max(4, Math.min(detail ? 9 : 6, Math.round(hpx / 13)));
+  const quad = (u, v) => {
+    const ax = cs[0].x + (cs[1].x - cs[0].x) * u, ay = cs[0].y + (cs[1].y - cs[0].y) * u;
+    const bx = cs[3].x + (cs[2].x - cs[3].x) * u, by = cs[3].y + (cs[2].y - cs[3].y) * u;
+    return { x: ax + (bx - ax) * v, y: ay + (by - ay) * v };
+  };
+  const hr = Math.max(2.2, Math.min(wpx / cols, hpx / rows) * 0.56);
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const u = (c + 0.5 + (r % 2) * 0.5) / cols;
+    if (u > 1) continue;
+    const v = (r + 0.5) / rows;
+    const p = quad(u, v);
+    const du = (u - 0.5) * 2, dv = (v - 0.5) * 2;
+    const d = Math.sqrt(du * du + dv * dv);
+    const rnd = seeded(b * 997 + fi * 101 + r * 17 + c * 7);
+    let fill;
+    if (d < 0.48) {
+      if (rnd > 0.78) fill = 'rgba(255,238,175,.80)';       // 封盖蜡房
+      else if (rnd > 0.45) fill = heatColor(temp + 0.7, 0.80); // 幼虫
+      else fill = heatColor(temp + 0.2, 0.72);                // 卵
+    } else if (d < 0.82) {
+      fill = rnd > 0.62 ? 'rgba(255,198,72,.62)' : 'rgba(196,124,38,.58)'; // 花粉 / 蜂蜜
+    } else {
+      fill = heatColor(temp - 2.6, 0.40);                     // 空房
+    }
+    ctx.beginPath();
+    for (let s = 0; s < 6; s++) {
+      const ang = Math.PI / 6 + s * Math.PI / 3;
+      const x = p.x + Math.cos(ang) * hr, y = p.y + Math.sin(ang) * hr;
+      if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+    ctx.strokeStyle = 'rgba(8,14,26,.42)'; ctx.lineWidth = 0.5; ctx.stroke();
+  }
+  ctx.restore();
+
+  path(); ctx.strokeStyle = 'rgba(150,220,255,.6)'; ctx.lineWidth = 1; ctx.stroke();
+  if (wpx > 90) {
+    ctx.font = '9px ui-monospace, Consolas, monospace';
+    ctx.fillStyle = 'rgba(200,240,255,.8)'; ctx.textBaseline = 'bottom';
+    ctx.fillText((b === H.inspectBox ? '育虫脾 ' : '第' + (b + 1) + '层 ') + temp.toFixed(1) + '℃', minX + 3, minY - 3);
+    ctx.textBaseline = 'top';
+  }
+}
+
+/* 全箱热传感总入口：箱体热晕 + 所有巢框脾面 */
+function drawHiveThermal(ctx) {
+  drawBoxHalos(ctx);
+  for (let b = 0; b < H.framesByBox.length; b++) {
+    const frames = H.framesByBox[b];
+    if (!frames) continue;
+    for (let f = 0; f < frames.length; f++) {
+      if (frames[f]) drawFrameComb(ctx, frames[f], b, f);
+    }
+  }
+}
+
+function drawTag(ctx, x, y, t, bx, by) {
+  const st = KIND_STYLE[t.kind], temp = targetTemp(t);
+  const bw = 108, bh = 28;
+  ctx.strokeStyle = st.color; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x + 7, y - 7);
+  ctx.lineTo(bx < x ? bx + bw : bx, by + bh / 2); ctx.stroke();
+  ctx.fillStyle = 'rgba(6,10,20,.76)'; ctx.fillRect(bx, by, bw, bh);
+  ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
+  ctx.fillStyle = st.color;
+  ctx.fillRect(bx - 1, by - 1, 9, 2); ctx.fillRect(bx - 1, by - 1, 2, 9);
+  ctx.fillRect(bx + bw - 8, by + bh - 1, 9, 2); ctx.fillRect(bx + bw - 1, by + bh - 8, 2, 9);
+  ctx.font = '600 9px ui-monospace, Consolas, monospace'; ctx.fillStyle = st.color;
+  ctx.fillText(st.name + (t.stage ? '·' + t.stage : ''), bx + 6, by + 4);
+  ctx.font = '10px ui-monospace, Consolas, monospace'; ctx.fillStyle = '#f2f7ff';
+  ctx.fillText(temp.toFixed(1) + '℃  ' + (t.conf * 100).toFixed(0) + '%', bx + 6, by + 15);
+}
+
+function drawThermal() {
+  const cv = document.getElementById('thermalCanvas');
+  if (!cv) return;
+  const dpr = Math.min(devicePixelRatio, 2);
+  const W = innerWidth, H = innerHeight;
+  if (cv.width !== Math.floor(W * dpr) || cv.height !== Math.floor(H * dpr)) {
+    cv.width = Math.floor(W * dpr); cv.height = Math.floor(H * dpr);
+  }
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(4,8,20,.58)'; ctx.fillRect(0, 0, W, H);
+  // 全箱热场较重：离屏缓存，每 0.6s 或指令变更后重绘，其余帧直接贴图
+  const now = performance.now();
+  if (!THERMAL.fieldCache || THERMAL.fieldDirty || now - THERMAL.fieldTime > 600
+      || THERMAL.fieldCache.width !== cv.width || THERMAL.fieldCache.height !== cv.height) {
+    const fc = THERMAL.fieldCache || document.createElement('canvas');
+    if (fc.width !== cv.width || fc.height !== cv.height) { fc.width = cv.width; fc.height = cv.height; }
+    const fctx = fc.getContext('2d');
+    fctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    fctx.clearRect(0, 0, W, H);
+    drawHiveThermal(fctx);
+    THERMAL.fieldCache = fc;
+    THERMAL.fieldTime = now;
+    THERMAL.fieldDirty = false;
+  }
+  ctx.drawImage(THERMAL.fieldCache, 0, 0, W, H);
+
+  const tags = [];
+  for (const t of THERMAL.targets) {
+    const p = projectToScreen(t.obj);
+    if (p.z < -1 || p.z > 1 || p.x < -80 || p.x > W + 80 || p.y < -80 || p.y > H + 80) continue;
+    const temp = targetTemp(t);
+    const r = t.kind === 'queen' ? 26 : t.kind === 'brood' ? 22 : 16;
+    const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+    g.addColorStop(0,    heatColor(temp, 0.95));
+    g.addColorStop(0.45, heatColor(temp - 0.8, 0.55));
+    g.addColorStop(1,    heatColor(temp - 2.5, 0));
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = KIND_STYLE[t.kind].color; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 3.2, 0, Math.PI * 2); ctx.stroke();
+    if (t.annotate) tags.push({ x: p.x, y: p.y, t });
+  }
+  // 标注框垂直避让：多目标聚在育虫区时不会互相盖住
+  const placed = [];
+  tags.sort((a, b) => a.y - b.y).forEach(tag => {
+    let bx = tag.x + 18, by = tag.y - 42;
+    if (bx + 108 > W - 10) bx = tag.x - 126;
+    if (by < 44) by = tag.y + 16;
+    for (let guard = 0; guard < 14; guard++) {
+      const hit = placed.some(p =>
+        !(bx + 112 < p.bx || bx > p.bx + 112 || by + 30 < p.by || by > p.by + 30));
+      if (!hit) break;
+      by += 32;
+    }
+    placed.push({ bx, by });
+    drawTag(ctx, tag.x, tag.y, tag.t, bx, by);
+  });
+
+  // 扫描线
+  const sy = (THERMAL.scan % 1) * H;
+  const sg = ctx.createLinearGradient(0, sy - 26, 0, sy + 6);
+  sg.addColorStop(0, 'rgba(120,220,255,0)');
+  sg.addColorStop(0.8, 'rgba(120,220,255,.10)');
+  sg.addColorStop(1, 'rgba(160,240,255,.30)');
+  ctx.fillStyle = sg; ctx.fillRect(0, sy - 26, W, 32);
+  ctx.fillStyle = 'rgba(170,240,255,.55)'; ctx.fillRect(0, sy, W, 1);
+
+  // 网格 / 取景角 / 准星
+  ctx.strokeStyle = 'rgba(120,190,255,.07)'; ctx.lineWidth = 1;
+  for (let x = (W / 2) % 60; x < W; x += 60) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  for (let y = (H / 2) % 60; y < H; y += 60) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  const m = 22, L = 24;
+  ctx.strokeStyle = 'rgba(140,220,255,.55)'; ctx.lineWidth = 1.5;
+  [[m, m, 1, 1], [W - m, m, -1, 1], [m, H - m, 1, -1], [W - m, H - m, -1, -1]].forEach(v => {
+    ctx.beginPath(); ctx.moveTo(v[0] + v[2] * L, v[1]); ctx.lineTo(v[0], v[1]);
+    ctx.lineTo(v[0], v[1] + v[3] * L); ctx.stroke();
+  });
+  const cx = W / 2, cy = H / 2;
+  ctx.strokeStyle = 'rgba(160,230,255,.35)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(cx - 14, cy); ctx.lineTo(cx - 5, cy); ctx.moveTo(cx + 5, cy); ctx.lineTo(cx + 14, cy);
+  ctx.moveTo(cx, cy - 14); ctx.lineTo(cx, cy - 5); ctx.moveTo(cx, cy + 5); ctx.lineTo(cx, cy + 14);
+  ctx.stroke();
+  ctx.font = '10px ui-monospace, Consolas, monospace'; ctx.fillStyle = 'rgba(150,215,255,.6)';
+  ctx.fillText('热成像识别 · 幼虫与三型蜂智能识别', m + 8, m + 14);
+  ctx.fillText('记录 ●  ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }), m + 8, H - m - 8);
+}
+
+/* 教学评价：数字福利 + 存活率 + 蜜产量 + 伦理积分 */
+function welfare() {
+  const dev = Math.abs(THERMAL.core - 35.0);
+  const comfort = Math.max(40, Math.round(98 - dev * 14 - THERMAL.wave * 6));
+  const autonomy = THERMAL.core > 36.2 ? 72 : THERMAL.core < 33.4 ? 76 : 90;
+  const health = Math.max(40, Math.round(98 - dev * 11));
+  const survival = Math.max(60, Math.min(99.8, 99.2 - dev * 3.5 - THERMAL.wave * 2));
+  const honey = Math.max(4, +(20.5 - dev * 3.2).toFixed(1));
+  return {
+    comfort, autonomy, health,
+    total: Math.round((comfort + autonomy + health) / 3),
+    survival: +survival.toFixed(1), honey,
+  };
+}
+function thermalStatus() {
+  const c = THERMAL.core;
+  if (c >= 36.5) return ['bad', '⚠ 热应激预警：巢温持续偏高，幼虫发育受损，建议立即通风降温。'];
+  if (c < 33.2) return ['bad', '⚠ 冷害预警：育虫区温度不足，蜂王产卵与幼虫存活受威胁，建议应急保温。'];
+  if (c > 35.8) return ['warn', '巢温偏高（>35.8℃），接近热应激阈值，建议加强通风。'];
+  if (c < 34.3) return ['warn', '巢温略低，育虫区发育偏慢，注意保温。'];
+  return ['ok', '✓ 育虫区温度适宜（34.3–35.8℃），蜂群状态正常，无热应激。'];
+}
+
+function renderTargetList() {
+  const box = document.getElementById('tpTargets');
+  if (!box) return;
+  const cnt = { queen: 0, worker: 0, drone: 0, brood: 0 };
+  for (const t of THERMAL.targets) cnt[t.kind]++;
+  THERMAL.counts = cnt;
+  box.innerHTML = Object.keys(KIND_STYLE).map(k => {
+    const s = KIND_STYLE[k];
+    const temp = k === 'brood' ? THERMAL.core : s.temp;
+    const cf = k === 'brood' ? 0.96 : k === 'queen' ? 0.98 : k === 'drone' ? 0.94 : 0.95;
+    return '<div class="tp-row"><span class="sw" style="background:' + s.color + '"></span>'
+      + '<span class="nm">' + s.name + '</span><span class="ct">' + cnt[k] + ' · ' + temp.toFixed(1) + '℃</span>'
+      + '<span class="cf">' + (cf * 100).toFixed(0) + '%</span></div>';
+  }).join('');
+  const total = document.getElementById('tpTotal');
+  if (total) total.textContent = '(' + THERMAL.targets.length + ')';
+}
+function updateThermalUI() {
+  renderTargetList();
+  const w = welfare(), st = thermalStatus();
+  const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  set('tpCore', THERMAL.core.toFixed(1) + ' ℃');
+  set('tpNest', (THERMAL.core - 2.4).toFixed(1) + ' ℃');
+  set('tpWave', '±' + THERMAL.wave.toFixed(1) + ' ℃');
+  set('tpAmb', THERMAL.ambient.toFixed(1) + ' ℃');
+  const superB = H.boxes.length > 1
+    ? (H.inspectBox + 1 < H.boxes.length ? H.inspectBox + 1 : H.inspectBox - 1)
+    : H.inspectBox;
+  set('tpSuper', boxTemp(superB).toFixed(1) + ' ℃');
+  const se = document.getElementById('tpStatus');
+  if (se) { se.className = 'tp-status' + (st[0] === 'ok' ? '' : st[0] === 'warn' ? ' warn' : ' bad'); se.textContent = st[1]; }
+  set('tpCode', '[' + [
+    THERMAL.core, THERMAL.core - 2.4, THERMAL.ambient, THERMAL.wave,
+    w.comfort / 100, (THERMAL.counts.worker || 0) * 0.1
+  ].map(x => (+x).toFixed(2)).join(', ') + ']');
+  const meter = (id, v) => { const e = document.getElementById(id); if (e) e.style.width = v + '%'; };
+  meter('mMeterComfort', w.comfort); meter('mMeterAutonomy', w.autonomy); meter('mMeterHealth', w.health);
+  set('mNumComfort', w.comfort); set('mNumAutonomy', w.autonomy); set('mNumHealth', w.health);
+  set('tpWelfare', w.total + ' / 100');
+  set('tpSurv', w.survival.toFixed(1) + ' %');
+  set('tpHoney', w.honey.toFixed(1) + ' kg/群');
+  set('tpEthic', '+' + THERMAL.ethic);
+}
+
+/* 自然语言干预：通风降温 / 应急保温 / 恢复自然 */
+function thermalCommand(text) {
+  const s = String(text || '').toLowerCase();
+  let msg;
+  if (/通风|降温|散热|风扇|vent|cool/.test(s)) {
+    THERMAL.coreTarget = Math.max(32.5, THERMAL.coreTarget - 1.6);
+    THERMAL.wave = Math.min(1.2, +(THERMAL.wave + 0.1).toFixed(2));
+    THERMAL.ethic += (THERMAL.coreTarget >= 34 && THERMAL.coreTarget < 36.2) ? 8 : -5;
+    msg = '已下发：开启通风，目标巢温 ' + THERMAL.coreTarget.toFixed(1) + '℃。存活率与蜜产量实时反馈中。';
+  } else if (/保温|加热|升温|warm|heat/.test(s)) {
+    THERMAL.coreTarget = Math.min(37.5, THERMAL.coreTarget + 1.4);
+    THERMAL.ethic += THERMAL.coreTarget <= 35.9 ? 8 : -5;
+    msg = '已下发：启动应急保温，目标巢温 ' + THERMAL.coreTarget.toFixed(1) + '℃。';
+  } else if (/恢复|自然|复位|reset/.test(s)) {
+    THERMAL.coreTarget = 35.2; THERMAL.wave = 0.3; THERMAL.ethic += 5;
+    msg = '已恢复自然蜂群状态：育虫区核心温度 35.2℃。';
+  } else {
+    msg = '未识别该指令。可尝试：「通风降温」「应急保温」「恢复自然」。';
+  }
+  const log = document.getElementById('tpLog');
+  if (log) log.textContent = '› ' + msg;
+  THERMAL.fieldDirty = true;
+  updateThermalUI();
+}
+
+function toggleThermal(force) {
+  const on = force === undefined ? !THERMAL.on : !!force;
+  THERMAL.on = on;
+  document.getElementById('thermalOverlay').classList.toggle('on', on);
+  const panel = document.getElementById('thermalPanel');
+  if (panel) panel.classList.toggle('on', on);
+  const btn = document.getElementById('btnThermal');
+  btn.classList.toggle('on', on);
+  btn.querySelector('.txt').textContent = on ? '退出热成像' : '热成像识别';
+  if (on) {
+    THERMAL.savedExposure = renderer.toneMappingExposure;
+    THERMAL.savedCam = camera.position.clone();
+    THERMAL.savedTarget = controls.target.clone();
+    renderer.toneMappingExposure = 0.42;
+    scene.background = new THREE.Color(0x05070f);
+    if (scene.fog) scene.fog.color.set(0x05070f);
+    sky.visible = false;
+    // 全箱热传感：全景视角覆盖整只蜂箱，同时提起蜂王脾展示拟真巢房细节
+    flyCamera('wide');
+    const fi = CFG.interior.queenFrame;
+    const f = frameAt(H.inspectBox, fi);
+    if (f && (liftMap.get(f)?.target || 0) <= 0.001) liftFrame(H.inspectBox, fi);
+    camera.position.set(1.9, 1.5, 2.3);
+    controls.target.set(0, 1.05, 0);
+    controls.update();
+    THERMAL.fieldDirty = true;
+    buildThermalTargets();
+    updateThermalUI();
+  } else {
+    renderer.toneMappingExposure = THERMAL.savedExposure;
+    scene.background = new THREE.Color(SKY);
+    if (scene.fog) scene.fog.color.set(SKY);
+    sky.visible = true;
+    if (THERMAL.savedCam && THERMAL.savedTarget) {
+      camera.position.copy(THERMAL.savedCam);
+      controls.target.copy(THERMAL.savedTarget);
+      controls.update();
+    }
+  }
+}
+
+document.getElementById('btnThermal').addEventListener('click', () => toggleThermal());
+document.querySelectorAll('#thermalPanel .tp-acts button').forEach(b =>
+  b.addEventListener('click', () => thermalCommand(b.dataset.cmd)));
+document.getElementById('tpSend').addEventListener('click', () => {
+  const inp = document.getElementById('tpInput');
+  thermalCommand(inp.value); inp.value = '';
+});
+document.getElementById('tpInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('tpSend').click();
+});
+
+/* ==========================================================================
+   ⑧.6 每帧循环
+   ========================================================================== */
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.60);   // 上限放宽：低帧率下仍按真实时间推进速度 / 缓动
+  const t = clock.elapsedTime;
+  if (!paused) {
+    if (CFG.inspection.auto && mixer) mixer.update(dt * CFG.inspection.speed);
+    else updateLifts(dt);
+    const I = CFG.interior;
+    for (const rec of interiorBees) {
+      const s = t * I.crawlHz * Math.PI * 2 + rec.index * 1.7 + rec.frame * 0.4;
+      const a = I.crawlAmp * (rec.kind === 'queen' ? 0.7 : 1);
+      rec.group.position.set(
+        rec.base.x + Math.sin(s) * a,
+        rec.base.y + Math.cos(s * 0.73) * a * 0.55,
+        rec.base.z
+      );
+      rec.group.getWorldPosition(rec.world);
+    }
+    if (queenParts) {
+      const qb = queenParts.bee;
+      queenParts.dot.position.set(qb.position.x, qb.position.y, qb.position.z + beeScaleNow() * 0.42);
+    }
+    updateFlyers(dt, t);
+    liveTick += dt;
+    if (liveTick > 0.25) {
+      liveTick = 0;
+      document.getElementById('speedLive').textContent =
+        '实时：A ' + flyers[0].speedNow.toFixed(2) + ' m/s · B ' + flyers[1].speedNow.toFixed(2) +
+        ' m/s（' + (paused ? '暂停' : CFG.flight.speed.toFixed(2) + '×') + '）';
+    }
+  }
+  sky.position.copy(camera.position);
+  controls.update();
+  renderer.render(scene, camera);
+  if (THERMAL.on) {
+    const k = 1 - Math.exp(-1.2 * dt);
+    THERMAL.core += (THERMAL.coreTarget - THERMAL.core) * k;
+    THERMAL.scan += dt * 0.16;
+    if (t - THERMAL.lastUi > 0.5) { THERMAL.lastUi = t; updateThermalUI(); }
+    drawThermal();
+  }
+}
+
+/* ==========================================================================
+   ⑨ 交互：点击拾取、UI、window.HIVE 调参接口
+   ========================================================================== */
+function setStatus(dotId, textId, text, kind) {
+  const d = document.getElementById(dotId); if (d) d.className = 'dot' + (kind ? ' ' + kind : '');
+  const s = document.getElementById(textId); if (s) s.textContent = text;
+}
+function flyCamera(which) {
+  const preset = typeof which === 'string' ? CFG.cameras[which] : which;
+  if (!preset) return;
+  if (preset.offset) {
+    // 特写时移开外柜（队长教学版 L2 的 setClad('off')），否则几十片半透明
+    // 木挂板叠在一起会把镜头糊成一片棕色。
+    setCladdingMode('off');
+    const q = queenParts ? queenParts.bee.getWorldPosition(new THREE.Vector3())
+      : new THREE.Vector3(0, 1.0, 0.03);
+    camera.position.copy(q).add(new THREE.Vector3().fromArray(preset.offset));
+    controls.target.copy(q);
+  } else {
+    setCladdingMode('ghost');
+    camera.position.fromArray(preset.pos); controls.target.fromArray(preset.target);
+  }
+  controls.update();
+}
+function syncStructureUI() {
+  const sb = document.getElementById('selBox');
+  const sf = document.getElementById('selFrame');
+  if (!sb || !sf) return;
+  sb.innerHTML = '';
+  for (let i = 0; i < H.boxes.length; i++) {
+    const o = document.createElement('option');
+    o.value = i; o.textContent = `第 ${i + 1} 层 · ${CFG.labHive.stack[i] === 'super' ? '浅继箱' : '深育虫箱'}`;
+    if (i === H.inspectBox) o.selected = true;
+    sb.appendChild(o);
+  }
+  const n = (H.framesByBox[H.inspectBox] || []).length || 10;
+  sf.innerHTML = '';
+  for (let i = 0; i < n; i++) {
+    const o = document.createElement('option');
+    o.value = i; o.textContent = `第 ${i + 1} 框`;
+    if (i === CFG.interior.queenFrame) o.selected = true;
+    sf.appendChild(o);
+  }
+}
+
+// 点击拾取：优先蜜蜂（教学卡片）→ 巢框（含 Alt 强制提层），并跳过被 ghost 掉的外柜
+
+/* ==========================================================================
+   ⑨.0 蜜蜂点击教学：类型 × 动作状态 →《养蜂学》专业知识点
+   ========================================================================== */
+const BEE_LESSONS = {
+  queen_patrol: {
+    kind: 'queen', badge: '蜂王', state: '育虫脾巡行 · 寻房产卵',
+    body: '<b>级型地位</b>：蜂王是蜂群中唯一的雌性生殖个体，由受精卵发育而来，因整个幼虫期持续取食蜂王浆而完成级型分化。<br>'
+      + '<b>繁殖力</b>：产卵盛期一昼夜可产 1500–2000 粒卵，日卵量可超过自身体重；体长 16–18 mm，腹部修长，螫针弯曲仅在斗王时使用。<br>'
+      + '<b>蜂王信息素</b>：以上颚腺分泌的 9-ODA（反式-9-氧代-2-癸烯酸）为主成分的「蜂王物质」，经侍从蜂在群内级联传递，抑制工蜂卵巢发育、维持群体秩序。<br>'
+      + '<b>背标</b>：白色标记为国际五年色标（尾数 1/6 年 = 白色），2026 年用白色。',
+  },
+  worker_retinue: {
+    kind: 'worker', badge: '工蜂 · 侍从蜂', state: '蜂王身侧 · 触角触摸并饲喂蜂王',
+    body: '<b>侍从蜂（retinue）</b>：育虫脾上常有 6–10 只青年工蜂头朝蜂王围成侍从圈，以触角触摸、舔取蜂王体表获取蜂王信息素。本演示在蜂王周围保留 5 只侍从蜂（真实侍从圈 6–10 只）。<br>'
+      + '<b>信息素级联</b>：侍从蜂再通过食物交换与个体接触把蜂王物质传遍全群，约 30 分钟内全群「化学形象」即可更新——这是蜂王把数万只工蜂维持为一个整体的核心通讯机制。<br>'
+      + '<b>饲喂</b>：蜂王食量虽大却不能自理，全程由侍从蜂饲喂蜂王浆。',
+  },
+  worker_patrol: {
+    kind: 'worker', badge: '工蜂', state: '脾面爬行 · 巡脾检查',
+    body: '<b>年龄多态分工</b>：工蜂职能随日龄推进——1–3 日龄保洁与保温，3–11 日龄泌浆哺育幼虫，12–17 日龄泌蜡筑巢、酿蜜与扇风调温，18 日龄前后转入守卫与采集。<br>'
+      + '<b>形态</b>：体长 12–13 mm，后足具花粉篮；爬行时六足抓附脾面、腹部朝脾、身体长轴平行脾面。<br>'
+      + '<b>寿命</b>：采蜜期约 35–40 天，越冬蜂依靠越冬集群可存活半年以上。',
+  },
+  drone_rest: {
+    kind: 'drone', badge: '雄蜂', state: '蜂王脾外圈 · 静息',
+    body: '<b>来源</b>：由未受精卵发育而成（产雄孤雌生殖），遗传上只有母亲没有父亲。<br>'
+      + '<b>形态</b>：体长 14–16 mm，复眼大而在头顶背面相接，胸宽腹钝、飞行力强；无螫针、无花粉篮。<br>'
+      + '<b>职能</b>：不采集、不参与巢内工作，唯一使命是婚飞交尾——晴暖午后飞往 20–30 m 高空的雄蜂聚集区（DCA）。<br>'
+      + '<b>结局</b>：交尾即死；蜜源匮乏或秋末常被工蜂驱逐出巢。',
+  },
+  flyer_in: {
+    kind: 'worker', badge: '采集蜂', state: '归巢飞行 · 携粉带蜜',
+    body: '<b>花粉篮</b>：后足胫节外侧的花粉篮装载花粉团，单次载粉约 10–30 mg（约为体重的 20%）。<br>'
+      + '<b>舞蹈语言</b>：归巢后在巢脾上以圆舞（近距蜜源）或 8 字摆尾舞（方位 + 距离）共享蜜源信息——von Frisch 因此获 1973 年诺贝尔生理学或医学奖。<br>'
+      + '<b>速度</b>：近巢减速至 0.32 m/s 进巢，远端巡航 3.2–3.6 m/s。',
+  },
+  flyer_out: {
+    kind: 'worker', badge: '采集蜂', state: '出巢采集飞行',
+    body: '<b>采集半径</b>：通常 2–3 km，缺蜜时可超过 5 km；单次出巢访问数十至数百朵花，一天可出巢 10 余次。<br>'
+      + '<b>四大资源</b>：花蜜（酿蜜原料）、花粉（蛋白质来源）、树胶（蜂胶原料）、水（调温与稀释）。<br>'
+      + '<b>飞行剖面</b>：出巢 63% 走直线，0.54 m/s 起步加速，远段巡航 3.2–3.6 m/s。',
+  },
+  flyer_hover: {
+    kind: 'worker', badge: '青年蜂', state: '巢门前悬停 · 定向飞行',
+    body: '<b>定向飞行（orientation flight）</b>：5–15 日龄的青年工蜂面对巢门悬停、后退绕弧，建立以巢门景观为参照的空间记忆，防止返巢时迷巢。<br>'
+      + '<b>守卫检查</b>：巢门口 15–30 日龄的守卫蜂逐只核查来蜂体表气味，非同群者被拦阻——蜂群以「巢脾气味 + 个体信息素」的混合信号识别成员。',
+  },
+  flyer_land: {
+    kind: 'worker', badge: '采集蜂', state: '踏板降落 · 爬行入巢',
+    body: '<b>巢门踏板</b>：相当于蜂群的「停机跑道」，采集蜂对准巢门减速、降落、爬行入巢，把花蜜交给内勤蜂。<br>'
+      + '<b>酿蜜并未结束</b>：内勤蜂反复吞吐混入转化酶，摊于房口扇风脱水，含水量从 40% 以上降到 ≤18% 才封盖为成熟蜜。',
+  },
+  brood_card: {
+    kind: 'brood', badge: '幼虫', state: '育虫房 · 发育中', body: '',
+  },
+};
+const BROOD_LESSON = {
+  '卵': '<b>卵期（3 天）</b>：蜂王产卵于房底，乳白色香蕉形；第一天直立、第二天倾斜、第三天倒卧房底——养蜂人借此判断产卵时间。<br>'
+    + '<b>温度</b>：育虫区必须稳定在 34–35℃，这是幼虫发育的硬性阈值。',
+  '幼虫': '<b>幼虫期（工蜂 6 天）</b>：前 3 天由哺育蜂饲喂蜂王浆，之后改喂蜂粮（花粉与蜜的发酵混合物）——正是这一「换粮」决定了工蜂级型而非蜂王。<br>'
+    + '<b>封盖</b>：第 6 天末工蜂房封盖进入蛹期；蜂王大房与雄蜂房封盖时间与形状不同，是识别王台与雄蜂脾的依据。',
+  '蛹': '<b>蛹期（封盖期）</b>：体内组织重塑，成虫器官由成虫芽分化完成。发育历期：蜂王 16 天、工蜂 21 天（卵 3 + 幼虫 6 + 蛹 12）、雄蜂 24 天。<br>'
+    + '<b>出房</b>：咬开封盖爬出即为青年蜂，巢内「人口」的自然更替由此完成。',
+};
+let beeCardTimer = null;
+function pickBee(clickX, clickY) {
+  // 1) 射线精确拾取蜂体网格
+  let best = null;
+  const test = (obj, meta) => {
+    const hits = ray.intersectObject(obj, true);
+    if (hits.length && (!best || hits[0].distance < best.dist)) best = { dist: hits[0].distance, ...meta };
+  };
+  const near = (obj, meta) => {
+    const p = projectToScreen(obj);
+    if (p.z < -1 || p.z > 1) return;
+    const d = Math.hypot(p.x - clickX, p.y - clickY);
+    if (d < 26 && (!best || d < best.dist)) best = { dist: d, ...meta };
+  };
+  for (const rec of interiorBees) test(rec.group, { type: 'interior', rec });
+  for (const f of flyers) test(f.bee, { type: 'flyer', flyer: f });
+  if (best) return best;
+  // 2) 屏幕邻域兜底：蜜蜂太小射线易落空；幼虫锚点无实体网格，仅此通道可点
+  if (!THERMAL.broodAnchors.length && activeHive) buildThermalTargets();
+  for (const rec of interiorBees) near(rec.group, { type: 'interior', rec });
+  for (const f of flyers) near(f.bee, { type: 'flyer', flyer: f });
+  for (const a of THERMAL.broodAnchors) near(a, { type: 'brood', anchor: a });
+  return best;
+}
+function lessonFor(hit) {
+  if (hit.type === 'interior') {
+    const r = hit.rec, I = CFG.interior;
+    if (r.kind === 'queen') return BEE_LESSONS.queen_patrol;
+    if (r.kind === 'drone') return BEE_LESSONS.drone_rest;
+    return r.index < I.retinueCount ? BEE_LESSONS.worker_retinue : BEE_LESSONS.worker_patrol;
+  }
+  if (hit.type === 'flyer') {
+    const f = hit.flyer;
+    if (f.ground > 0.5) return BEE_LESSONS.flyer_land;
+    if (f.hover > 0.5) return BEE_LESSONS.flyer_hover;
+    return f.key === 'A' ? BEE_LESSONS.flyer_in : BEE_LESSONS.flyer_out;
+  }
+  const tg = THERMAL.targets.find(t => t.obj === hit.anchor);
+  const stage = tg && tg.stage ? tg.stage : '卵';
+  return { ...BEE_LESSONS.brood_card, state: '育虫房 · ' + stage + '发育期', body: BROOD_LESSON[stage] || BROOD_LESSON['卵'] };
+}
+function showBeeLesson(hit, ev) {
+  const L = lessonFor(hit);
+  const card = document.getElementById('beeCard');
+  if (!card) return;
+  const badge = document.getElementById('bcBadge');
+  badge.textContent = L.badge;
+  badge.style.borderColor = KIND_STYLE[L.kind].color;
+  badge.style.background = KIND_STYLE[L.kind].color + '2e';
+  document.getElementById('bcState').textContent = L.state;
+  document.getElementById('bcBody').innerHTML = L.body;
+  card.style.display = 'block';
+  const w = card.offsetWidth, h = card.offsetHeight;
+  let x = (ev ? ev.clientX : innerWidth / 2) + 16;
+  let y = (ev ? ev.clientY : innerHeight / 2) - 20;
+  if (x + w > innerWidth - 12) x = Math.max(12, (ev ? ev.clientX : 12) - w - 16);
+  if (y + h > innerHeight - 12) y = Math.max(12, innerHeight - h - 12);
+  card.style.left = x + 'px'; card.style.top = y + 'px';
+  clearTimeout(beeCardTimer);
+  beeCardTimer = setTimeout(() => { card.style.display = 'none'; }, 18000);
+}
+document.getElementById('bcClose').addEventListener('click', () => {
+  const c = document.getElementById('beeCard');
+  c.style.display = 'none';
+  clearTimeout(beeCardTimer);
+});
+
+const ray = new THREE.Raycaster();
+const ptr = new THREE.Vector2();
+let down = null;
+canvas.addEventListener('pointerdown', e => { down = { x: e.clientX, y: e.clientY }; });
+canvas.addEventListener('pointerup', e => {
+  if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) { down = null; return; }
+  down = null;
+  if (!activeHive) return;
+  const r = canvas.getBoundingClientRect();
+  ptr.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  ray.setFromCamera(ptr, camera);
+  // ★ 专业课堂：点击蜜蜂 / 幼虫 →《养蜂学》知识点（类型 × 动作状态）
+  const bee = pickBee(e.clientX, e.clientY);
+  if (bee) { showBeeLesson(bee, e); return; }
+  const hits = ray.intersectObject(activeHive, true);
+  let frameHit = null, boxHit = null, cladHit = null;
+  for (const h of hits) {
+    let o = h.object, part = null, frameNode = null, boxNode = null, underClad = false;
+    for (let q = o; q && q !== activeHive; q = q.parent) {
+      if (!part && q.userData.part) part = q.userData.part;
+      if (H.clad && q === H.clad) underClad = true;
+      const fm = /^box(\d+)_frame(\d+)$/.exec(q.name || '');
+      if (fm && !frameNode) frameNode = { o: q, box: +fm[1], frame: +fm[2] };
+      const bm = /^box(\d+)$/.exec(q.name || '');
+      if (bm && !boxNode) boxNode = { o: q, box: +bm[1] };
+    }
+    if (underClad && CFG.cutaway.enabled && CFG.cutaway.cladding !== 'solid') { cladHit = cladHit || part; continue; }
+    if (frameNode && !frameHit && ['frame', 'comb', 'pin', 'tag'].includes(part)) frameHit = { ...frameNode, part, title: h.object.userData.title };
+    if (boxNode && !boxHit && part === 'box') boxHit = { ...boxNode, part, title: h.object.userData.title };
+    if (frameHit && boxHit) break;
+  }
+  if (e.altKey && boxHit) { liftBox(boxHit.box); return; }
+  if (frameHit) { liftFrame(frameHit.box, frameHit.frame); return; }
+  if (boxHit) { liftBox(boxHit.box); return; }
+  if (cladHit && !CFG.cutaway.enabled) {
+    CFG.cutaway.enabled = true; applyCutaway(true);
+    setPartInfo('已切换到 Ghost 半透明剖视视图。');
+  }
+});
+
+document.getElementById('sBee').addEventListener('input', e => setBeeScale(parseFloat(e.target.value)));
+document.getElementById('sSpeed').addEventListener('input', e => setFlightSpeed(parseFloat(e.target.value)));
+document.querySelectorAll('button.zoom').forEach(b => b.addEventListener('click', () => setTeachingZoom(Number(b.dataset.zoom))));
+document.querySelectorAll('button.spd').forEach(b => b.addEventListener('click', () => setFlightSpeed(Number(b.dataset.spd))));
+document.getElementById('btnPause').addEventListener('click', () => {
+  paused = !paused;
+  const b = document.getElementById('btnPause');
+  b.textContent = paused ? '继续' : '暂停'; b.classList.toggle('on', paused);
+});
+document.getElementById('btnCut').addEventListener('click', () => {
+  setCladdingMode(CFG.cutaway.enabled ? 'solid' : 'ghost');
+});
+document.getElementById('btnPath').addEventListener('click', () => setShowPaths(!CFG.flight.showPaths));
+document.getElementById('btnInside').addEventListener('click', () => flyCamera('inside'));
+document.getElementById('btnWide').addEventListener('click', () => flyCamera('wide'));
+document.getElementById('btnAuto').addEventListener('click', () => setAutoInspection(!CFG.inspection.auto));
+document.getElementById('btnLiftFrame').addEventListener('click', () => {
+  liftFrame(Number(document.getElementById('selBox').value),
+            Number(document.getElementById('selFrame').value));
+});
+document.getElementById('btnLiftBox').addEventListener('click', () => {
+  liftBox(Number(document.getElementById('selBox').value));
+});
+document.getElementById('btnResetLift').addEventListener('click', resetLifts);
+document.getElementById('btnFocusQueen').addEventListener('click', () => {
+  const fi = CFG.interior.queenFrame;
+  const f = (H.framesByBox[H.inspectBox] || [])[fi];
+  const wasUp = f && (liftMap.get(f)?.target || 0) > 0.001;
+  if (f && !wasUp) liftFrame(H.inspectBox, fi);
+  setCladdingMode('off');
+  // 相机对准「提起之后」的巢脾位置（此时提升动画可能还没走完）
+  const q = queenParts ? queenParts.bee.getWorldPosition(new THREE.Vector3())
+    : new THREE.Vector3(0, 1.0, 0.03);
+  if (!wasUp) q.y += CFG.lift.frameHeight;
+  camera.position.copy(q).add(new THREE.Vector3().fromArray(CFG.cameras.inside.offset));
+  controls.target.copy(q);
+  controls.update();
+  setPartInfo('已提起蜂王所在的育虫脾：上层箱体先抬 400 mm，外柜移开，相机对准脾面。'
+    + '蜂王（白色标记）、侍从工蜂与框上其它蜜蜂一起升起；看不清可按 3× 示意放大。');
+});
+window.addEventListener('keydown', e => {
+  if (/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) return;
+  if (e.key === '[') setFlightSpeed(Math.max(0.10, +(CFG.flight.speed - 0.1).toFixed(2)));
+  else if (e.key === ']') setFlightSpeed(Math.min(3.00, +(CFG.flight.speed + 0.1).toFixed(2)));
+  else if (e.code === 'Space') { e.preventDefault(); document.getElementById('btnPause').click(); }
+  else if (e.key.toLowerCase() === 'r') resetLifts();
+  else if (e.key.toLowerCase() === 't') toggleThermal();
+});
+
+const fileInput = document.getElementById('fileInput');
+document.getElementById('btnFile').addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => { const f = e.target.files && e.target.files[0]; if (f) useLocalGLB(f); });
+function useLocalGLB(file) {
+  if (!/\.glb$/i.test(file.name)) { alert('请选择 .glb 文件'); return; }
+  const url = URL.createObjectURL(file);
+  new GLTFLoader().loadAsync(url).then(g => {
+    installHive(g.scene, '拖入 GLB · ' + file.name, g.animations);
+  }).catch(err => console.warn('[Hive] 拖入 GLB 失败：', err));
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+let dragDepth = 0;
+const dropMask = document.getElementById('drop');
+window.addEventListener('dragenter', e => { e.preventDefault(); dragDepth++; dropMask.classList.add('on'); });
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('dragleave', e => { e.preventDefault(); if (--dragDepth <= 0) { dragDepth = 0; dropMask.classList.remove('on'); } });
+window.addEventListener('drop', e => {
+  e.preventDefault(); dragDepth = 0; dropMask.classList.remove('on');
+  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) useLocalGLB(f);
+});
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+window.HIVE = {
+  THREE, scene, camera, renderer, controls, CFG, HIVE_GLB_URL,
+  hiveHolder, H, get hive() { return activeHive; }, get labModel() { return labModel; },
+  boardInfo, entryPoint, combInfo,
+  interiorBees, allBees,
+  get queen() { return queenParts && queenParts.bee; },
+  get queenMarker() { return queenParts && queenParts.dot; },
+  flight: flyers, get curves() { return curves; }, pathLines, flightRoot,
+  get mixer() { return mixer; }, get inspectionClip() { return inspectionClip; },
+  liftMap,
+  setBeeScale, setTeachingZoom, setFlightSpeed, setShowPaths,
+  setCutaway: on => setCladdingMode(on ? 'ghost' : 'solid'),
+  setCladdingMode,
+  setAutoInspection, liftFrame, liftBox, resetLifts,
+  // 教学卡片：HIVE.teach('queen'|'worker'|'drone'|'brood') 直接弹出对应知识点
+  teach: kind => {
+    if (kind === 'brood') {
+      if (!THERMAL.broodAnchors.length && activeHive) buildThermalTargets();
+      if (!THERMAL.broodAnchors.length) return;
+      showBeeLesson({ type: 'brood', anchor: THERMAL.broodAnchors[0] }, null);
+      return;
+    }
+    const rec = interiorBees.find(r => r.kind === kind) || interiorBees[0];
+    if (rec) showBeeLesson({ type: 'interior', rec }, null);
+  },
+  rebuildInterior: () => { rebuildInterior(); setBeeScale(CFG.beeScale); },
+  moveInteriorBee, flyCamera, syncStructureUI,
+  get paused() { return paused; }, setPaused: v => { paused = !!v; },
+  thermal: {
+    toggle: toggleThermal,
+    command: thermalCommand,
+    get on() { return THERMAL.on; },
+    get report() {
+      return {
+        core: +THERMAL.core.toFixed(2), ambient: THERMAL.ambient, wave: THERMAL.wave,
+        counts: Object.assign({}, THERMAL.counts), welfare: welfare(), status: thermalStatus()[1],
+      };
+    },
+    setCoreTemp: v => {
+      THERMAL.coreTarget = Math.max(30, Math.min(38, Number(v) || 35.2));
+      THERMAL.core = THERMAL.coreTarget; updateThermalUI();
+    },
+  },
+};
+
+booted = true;
+rebuildInterior();
+rebuildFlightPaths();
+refreshScaleUI();
+setFlightSpeed(CFG.flight.speed);
+setShowPaths(CFG.flight.showPaths);
+setAutoInspection(CFG.inspection.auto);
+syncStructureUI();
+
+window.__APP_READY = true;
+document.getElementById('boot').classList.add('hide');
+animate();
+</script>
+</body>
+</html>
