@@ -1,0 +1,52 @@
+# 智能蜂箱项目 .gitignore
+# 适用于纯静态站点 + Python 本地预览的教学项目
+
+# ---------- Python 本地服务器 / 缓存 ----------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---------- Node（若未来引入构建脚本） ----------
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ---------- 编辑器 / IDE ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+
+# ---------- 操作系统 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ---------- 临时与备份文件 ----------
+*.tmp
+*.temp
+*.bak
+*.log
+*.orig
+*.rej
+
+# ---------- 本地环境（请勿提交任何密钥/凭据） ----------
+.env
+.env.*
+*.pem
+*.key
+
+# ---------- 构建中间产物（lab.html 为交付产物，不在忽略之列） ----------
+dist/
+build/
+*.min.js.map
